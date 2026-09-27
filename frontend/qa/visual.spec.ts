@@ -32,6 +32,63 @@ const ROUTES = [
   { name: "cart", path: "/cart" },
 ] as const;
 
+/**
+ * Fail fast if the server is serving a stale build.
+ *
+ * `next start` keeps serving after `next build` rewrites `.next`, and the HTML
+ * it emits can reference chunk hashes that no longer exist. The result is a run
+ * of misleading failures - missing CSS utilities, 500s on chunks, "images are
+ * broken" - that look like product bugs and are not. This was observed
+ * directly: a green suite went to 12/39 purely from a stale server.
+ *
+ * So the first thing the suite does is prove the server is actually serving the
+ * build on disk, and say so explicitly if not.
+ */
+test("the server is serving the current build", async ({ page, request }) => {
+  const stale: string[] = [];
+
+  page.on("response", (response) => {
+    if (response.url().includes("/_next/static/") && response.status() >= 400) {
+      stale.push(`${response.status()} ${response.url()}`);
+    }
+  });
+
+  await page.goto(BASE, { waitUntil: "networkidle" });
+
+  // If Tailwind's utilities are not applied, the design system is not loaded.
+  const styling = await page.evaluate(() => {
+    const first = document.querySelector("main");
+    return {
+      sheets: document.styleSheets.length,
+      rules: document.styleSheets[0]?.cssRules.length ?? 0,
+      // A card image with `w-full` must not render at its intrinsic width.
+      imageOverflows: Array.from(document.querySelectorAll("img")).some(
+        (image) => image.getBoundingClientRect().width > window.innerWidth,
+      ),
+      hasMain: first !== null,
+    };
+  });
+
+  expect(
+    stale,
+    "The server returned errors for build assets. It is almost certainly " +
+      "serving a stale build: run `npm run build` and restart the server.",
+  ).toEqual([]);
+
+  expect(styling.hasMain, "the page rendered no <main>").toBe(true);
+  expect(styling.sheets, "no stylesheet loaded - the CSS build is missing").toBeGreaterThan(0);
+  expect(styling.rules, "the stylesheet has almost no rules").toBeGreaterThan(50);
+  expect(
+    styling.imageOverflows,
+    "an image is wider than the viewport, so Tailwind's sizing utilities are " +
+      "not being applied - a stale or partial CSS build",
+  ).toBe(false);
+
+  // Prove the API is up too, so a later failure is unambiguous.
+  const health = await request.get("http://127.0.0.1:8000/health");
+  expect(health.ok(), "the backend is not answering on :8000").toBe(true);
+});
+
 test.describe("visual QA", () => {
   for (const viewport of VIEWPORTS) {
     test.describe(viewport.name, () => {

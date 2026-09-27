@@ -97,10 +97,15 @@ npm test            # 173 unit/component tests (vitest)
 npm run qa          # 39 browser tests (playwright) - needs the app on :3100
 ```
 
-`npm run qa` requires the built app running:
+`npm run qa` requires the built app running, and **must be rebuilt and
+restarted** before each run — `next start` keeps serving after `next build`
+rewrites `.next`, and the HTML it emits can reference chunk hashes that no
+longer exist. That produces failures that look like product bugs and are not;
+the suite's first test detects it and says so explicitly.
 
 ```bash
-npm run build && npm run start -- -p 3100
+npm run build
+npm run start -- -p 3100
 npx playwright install chromium   # first run only
 npm run qa
 ```
