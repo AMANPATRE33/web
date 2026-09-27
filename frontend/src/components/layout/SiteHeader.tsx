@@ -288,6 +288,15 @@ export function SiteHeader({ categories }: { categories: NavCategory[] }) {
             <Link
               key={category.slug}
               href={`/category/${category.slug}`}
+              // `prefetch={false}` is deliberate, not an oversight. Next
+              // prefetches a visible <Link> on hover/viewport, and this rail
+              // holds 18 of them plus a footer holding dozens more. Measured on
+              // /shop: 98 requests, and a filtered page took 26 seconds to
+              // settle because prefetches kept the network busy continuously.
+              // A shopper clicks one or two of these at most; pre-downloading
+              // the other sixteen is pure waste, and on mobile it competes with
+              // the product images for bandwidth.
+              prefetch={false}
               className="flex shrink-0 items-center gap-1.5 rounded-xs px-2.5 py-1 text-[13px] font-medium text-ink-700 transition-colors hover:bg-white hover:text-ink-950"
             >
               {category.name}

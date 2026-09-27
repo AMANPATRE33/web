@@ -3,11 +3,13 @@
 /**
  * Search box with debounced suggestions.
  *
- * The suggestions endpoint is called only when the query is at least two
- * characters, and every request is aborted when a newer keystroke lands, so
- * typing "hazard" does not fire six overlapping requests. The form still
- * navigates to `/search?q=...` on submit, so search works with JS disabled and
- * results are shareable URLs.
+ * Suggestions are fetched from this app's own `/api/search-suggestions` route
+ * rather than from the FastAPI backend directly, because a client component
+ * calling a different origin needs CORS to be right and fails silently when it
+ * is not. See the route handler for the full reasoning.
+ *
+ * The form still navigates to `/search?q=...` on submit, so search works with
+ * JavaScript disabled and results are shareable URLs.
  */
 
 import { Search, X } from "lucide-react";
@@ -15,7 +17,6 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
 
-import { getSearchSuggestions } from "@/lib/api/catalog";
 import type { SearchSuggestion } from "@/lib/api/types";
 import { cn } from "@/lib/cn";
 
@@ -62,8 +63,13 @@ export function SearchBox({
       const controller = new AbortController();
       abortRef.current = controller;
       try {
-        const items = await getSearchSuggestions(trimmed, 7);
-        if (!controller.signal.aborted) setResults({ for: trimmed, items });
+        const response = await fetch(
+          `/api/search-suggestions?q=${encodeURIComponent(trimmed)}`,
+          { signal: controller.signal },
+        );
+        if (!response.ok) throw new Error(`suggestions failed: ${response.status}`);
+        const payload = (await response.json()) as { suggestions: SearchSuggestion[] };
+        if (!controller.signal.aborted) setResults({ for: trimmed, items: payload.suggestions });
       } catch {
         // A failed suggestion lookup must not break typing or submission.
         if (!controller.signal.aborted) setResults({ for: trimmed, items: EMPTY });

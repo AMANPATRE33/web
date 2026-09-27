@@ -97,8 +97,9 @@ async def get_industry(
     if industry is None:
         raise NotFoundError(f"Industry '{slug}' was not found.")
 
-    # Explicit join rather than a lazy relationship: touching `industry.products`
-    # outside an awaited context raises MissingGreenlet.
+    # `Industry.products` is `noload` by default (see the model), so the picks
+    # are opted into explicitly. The index route deliberately does not, because
+    # it only needs the count.
     product_rows = await session.execute(
         select(Product)
         .join(IndustryProduct, IndustryProduct.product_id == Product.id)

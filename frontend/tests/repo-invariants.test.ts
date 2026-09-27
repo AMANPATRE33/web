@@ -124,7 +124,14 @@ describe("the catalogue is the source of truth", () => {
     );
     expect(files.length).toBeGreaterThan(10);
 
+    // One documented exception: SearchBox calls this app's own
+    // /api/search-suggestions route rather than the backend, because a client
+    // component calling a different origin needs CORS to be right. Anything
+    // else reaching for fetch() is bypassing the API client.
+    const allowed = new Set(["src/components/search/SearchBox.tsx"]);
+
     for (const file of files) {
+      if (allowed.has(file)) continue;
       const match = /(?<![.\w])fetch\s*\(/.exec(read(file));
       expect(match, `${file} calls fetch() directly`).toBeNull();
     }

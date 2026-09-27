@@ -187,7 +187,19 @@ class Industry(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     products: Mapped[list[Product]] = relationship(
         secondary="industry_products",
-        lazy="selectin",
+        # `noload`, matching `Category.products`, and this is a performance
+        # fix rather than a style choice.
+        #
+        # With `selectin`, SQLAlchemy emits a batched secondary SELECT whenever
+        # the parent is loaded - whether or not the attribute is ever read. The
+        # industries *index* only needs a count, which it computes from a
+        # correlated subquery, so `selectin` was loading all 60 linked products
+        # and, through them, every variant, image, tag and inventory row: 11
+        # queries and ~120ms to render 10 cards. It is now 1 query.
+        #
+        # The industry *detail* page needs the picks, so it opts in explicitly
+        # with `selectinload(Industry.products)` - see app/api/v1/content.py.
+        lazy="noload",
         order_by="IndustryProduct.position",
     )
 

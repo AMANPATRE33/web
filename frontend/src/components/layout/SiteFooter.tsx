@@ -233,6 +233,10 @@ function FooterLink({
     <li>
       <Link
         href={href}
+        // Same reasoning as the header's category rail: the footer carries
+        // dozens of links on every page. Prefetching all of them is what turned
+        // a 1.2s page into 98 network requests.
+        prefetch={false}
         className={
           emphasis
             ? "inline-flex items-center gap-1.5 text-[13px] font-semibold text-ink-900 underline underline-offset-4"

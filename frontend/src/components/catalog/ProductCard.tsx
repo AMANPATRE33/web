@@ -34,6 +34,10 @@ import { hasRealRating } from "@/lib/money";
  *    remains.
  *  - The entire card is a single link target. The heart sits above it and stops
  *    propagation, so it stays independently focusable and operable.
+ *  - `prefetch={false}` on the image overlay. The card contains two links to
+ *    the same product - the stretched overlay and the title - so Next was
+ *    prefetching the product route twice for every card on the page. The title
+ *    link keeps the prefetch, since that is the one a reader actually aims at.
  */
 export function ProductCard({
   product,
@@ -66,6 +70,7 @@ export function ProductCard({
           href={`/products/${product.slug}`}
           tabIndex={-1}
           aria-hidden="true"
+          prefetch={false}
           className="absolute inset-0 z-0"
         >
           <ProductImage

@@ -16,8 +16,14 @@
   --color-ink-100: #eceef0;
   --color-ink-200: #d7dbe0;
   --color-ink-300: #b3bac2;
-  --color-ink-400: #8b939d;
-  --color-ink-500: #6b737d;
+  /* --color-ink-400 and --color-ink-500 are contrast tokens, not just tints.
+     Both carry real text (SKUs, captions, "not published" placeholders) on
+     white, on ink-50 and on ink-100, so both clear WCAG AA 4.5:1 on all three.
+     The previous values were #8b939d (2.90:1) and #6b737d (4.48:1) - the latter
+     missing by 0.02, which is the classic way a palette drifts out of
+     compliance one nudge at a time. Caught by Lighthouse on /shop. */
+  --color-ink-400: #656c74;
+  --color-ink-500: #5c646e;
   --color-ink-600: #515863;
   --color-ink-700: #3d434b;
   --color-ink-800: #2a2f36;
