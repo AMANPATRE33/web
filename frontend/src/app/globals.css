@@ -1,26 +1,278 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* ==========================================================================
+   Safety Poster Prints — design system
+
+   Industrial premium, not generic SaaS. The palette is drawn from the
+   signage convention the business actually sells: safety amber for caution,
+   signal red for danger, plus a near-black ink and a true paper white.
+   Nothing here is a gradient-for-its-own-sake, and radii stay tight (2-4px)
+   because a 24px pill reads as consumer toy, not as an industrial product.
+   ========================================================================== */
+
+@theme {
+  /* --- ink & paper ------------------------------------------------------ */
+  --color-ink-50: #f6f7f8;
+  --color-ink-100: #eceef0;
+  --color-ink-200: #d7dbe0;
+  --color-ink-300: #b3bac2;
+  --color-ink-400: #8b939d;
+  --color-ink-500: #6b737d;
+  --color-ink-600: #515863;
+  --color-ink-700: #3d434b;
+  --color-ink-800: #2a2f36;
+  --color-ink-900: #171a1f;
+  --color-ink-950: #0b0d10;
+
+  /* --- signal amber: the caution colour, used as the primary action --- */
+  --color-signal-50: #fff9e6;
+  --color-signal-100: #fff0bf;
+  --color-signal-200: #ffe680;
+  --color-signal-300: #ffd733;
+  --color-signal-400: #ffc800;
+  --color-signal-500: #e0ab00;
+  --color-signal-600: #b58600;
+  --color-signal-700: #8a6400;
+  --color-signal-800: #5c4300;
+  --color-signal-900: #332500;
+
+  /* --- danger red: used only for genuine danger/error semantics --------- */
+  --color-danger-50: #fdf2f2;
+  --color-danger-100: #fbe4e4;
+  --color-danger-500: #c8102e;
+  --color-danger-600: #a80d26;
+  --color-danger-700: #87091e;
+
+  /* --- safe green: in-stock, first aid, assembly ----------------------- */
+  --color-safe-50: #f0faf3;
+  --color-safe-100: #dcf3e4;
+  --color-safe-500: #0e7a3c;
+  --color-safe-600: #0b6230;
+  --color-safe-700: #084a25;
+
+  /* --- informational blue: mandatory signage --------------------------- */
+  --color-info-50: #eff6ff;
+  --color-info-100: #dbeafe;
+  --color-info-500: #0057b8;
+  --color-info-600: #004696;
+
+  /* --- type ------------------------------------------------------------- */
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, -apple-system,
+    "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-2xs--letter-spacing: 0.08em;
+
+  /* --- radius: deliberately small. Industrial, not toy. --------------- */
+  --radius-xs: 2px;
+  --radius-sm: 3px;
+  --radius-md: 4px;
+  --radius-lg: 6px;
+
+  /* --- motion ---------------------------------------------------------- */
+  --ease-out-quint: cubic-bezier(0.22, 1, 0.36, 1);
+
+  /* --- layout ---------------------------------------------------------- */
+  --spacing-header: 4.5rem;
+  --container-page: 90rem;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
+/* ==========================================================================
+   Base
+   ========================================================================== */
+@layer base {
+  *,
+  *::before,
+  *::after {
+    border-color: var(--color-ink-200);
+  }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  html {
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+    /* Sticky header must not cover an anchor target. */
+    scroll-padding-top: 6rem;
+  }
+
+  body {
+    background-color: #fff;
+    color: var(--color-ink-900);
+    font-family: var(--font-sans);
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3,
+  h4 {
+    font-weight: 700;
+    letter-spacing: -0.021em;
+    text-wrap: balance;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* A single, consistent focus treatment. Visible on light and on dark, and
+     never removed - keyboard users must always see where they are. */
+  :focus-visible {
+    outline: 2px solid var(--color-ink-900);
+    outline-offset: 2px;
+    border-radius: var(--radius-xs);
+  }
+
+  .on-dark :focus-visible,
+  .dark-surface :focus-visible {
+    outline-color: var(--color-signal-400);
+  }
+
+  /* Firefox / WebKit autofill washes out our background unless corrected. */
+  input:-webkit-autofill,
+  input:-webkit-autofill:hover,
+  input:-webkit-autofill:focus {
+    -webkit-text-fill-color: var(--color-ink-900);
+    -webkit-box-shadow: 0 0 0 1000px #fff inset;
+    transition: background-color 9999s ease-in-out 0s;
+  }
+
+  ::selection {
+    background-color: var(--color-signal-200);
+    color: var(--color-ink-950);
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+/* ==========================================================================
+   Components
+   ========================================================================== */
+@layer components {
+  /* --- page container -------------------------------------------------- */
+  .container-page {
+    width: 100%;
+    max-width: var(--container-page);
+    margin-inline: auto;
+    padding-inline: 1rem;
+  }
+  @media (min-width: 640px) {
+    .container-page {
+      padding-inline: 1.5rem;
+    }
+  }
+  @media (min-width: 1024px) {
+    .container-page {
+      padding-inline: 2rem;
+    }
+  }
+
+  /* --- eyebrow: the small uppercase label used above section headings --- */
+  .eyebrow {
+    font-size: var(--text-2xs);
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--color-ink-500);
+  }
+
+  /* --- hairline: a 1px rule that reads as engineering drawing, not decoration */
+  .rule-grid {
+    background-image:
+      linear-gradient(to right, rgb(23 26 31 / 0.06) 1px, transparent 1px),
+      linear-gradient(to bottom, rgb(23 26 31 / 0.06) 1px, transparent 1px);
+    background-size: 48px 48px;
+  }
+
+  /* --- safety-stripe motif, used sparingly on the bulk CTA ------------- */
+  .safety-stripe {
+    background-image: repeating-linear-gradient(
+      -45deg,
+      var(--color-signal-400) 0 12px,
+      var(--color-ink-950) 12px 24px
+    );
+  }
+
+  /* --- skip link ------------------------------------------------------- */
+  .skip-link {
+    position: absolute;
+    left: -9999px;
+    top: 0;
+    z-index: 200;
+  }
+  .skip-link:focus {
+    left: 0.5rem;
+    top: 0.5rem;
+    padding: 0.625rem 1rem;
+    background: var(--color-ink-950);
+    color: #fff;
+    font-size: 0.875rem;
+    font-weight: 600;
+  }
+}
+
+/* ==========================================================================
+   Utilities
+   ========================================================================== */
+@layer utilities {
+  /* Hide scrollbars on the horizontal chip rails without losing scroll. */
+  .no-scrollbar {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Clamp helpers for card copy. */
+  .line-clamp-2 {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+  .line-clamp-3 {
+    display: -webkit-box;
+    -webkit-line-clamp: 3;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* ==========================================================================
+   Reduced motion
+   Honour the OS setting. Framer Motion reads the same media query via
+   useReducedMotion, so CSS transitions and JS animation agree.
+   ========================================================================== */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ==========================================================================
+   Print — a safety poster is often printed. Keep the PDP clean.
+   ========================================================================== */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+  body {
+    background: #fff;
+  }
 }

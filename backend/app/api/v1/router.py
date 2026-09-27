@@ -14,6 +14,7 @@ from app import __version__
 from app.api.v1.account import router as account_router
 from app.api.v1.admin_users import router as admin_users_router
 from app.api.v1.catalog import router as catalog_router
+from app.api.v1.content import router as content_router
 
 router = APIRouter()
 
@@ -26,6 +27,7 @@ async def api_index() -> dict[str, Any]:
         "version": __version__,
         "resources": {
             "catalog": "/api/v1/products, /api/v1/categories, /api/v1/search",
+            "content": "/api/v1/industries, /api/v1/blog/posts",
             "cart": "/api/v1/cart",
             "wishlist": "/api/v1/wishlist",
             "checkout": "/api/v1/checkout",
@@ -40,6 +42,9 @@ async def api_index() -> dict[str, Any]:
 
 # --- public catalogue -------------------------------------------------------
 router.include_router(catalog_router, tags=["catalog"])
+
+# --- public content: industries and blog (read-only) -----------------------
+router.include_router(content_router, tags=["content"])
 
 # --- account (customer self-service) ---------------------------------------
 router.include_router(account_router, prefix="/account", tags=["account"])

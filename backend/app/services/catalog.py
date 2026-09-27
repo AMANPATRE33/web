@@ -22,7 +22,18 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from sqlalchemy import Select, and_, func, or_, select, text
+from sqlalchemy import (
+    ARRAY,
+    Select,
+    String,
+    Text,
+    and_,
+    cast,
+    func,
+    or_,
+    select,
+    text,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload, selectinload
 
@@ -72,6 +83,10 @@ class ProductFilters:
     category_ids: tuple[uuid.UUID, ...] = ()
     brand: str | None = None
     tags: tuple[str, ...] = ()
+    #: Explicit slugs. Used by pages that link a specific curated set of
+    #: products (industry picks, blog references) and must not re-derive them
+    #: from a category.
+    slugs: tuple[str, ...] = ()
     #: Material values, e.g. "3MM ACP". OR semantics: any of the selected.
     materials: tuple[str, ...] = ()
     #: Size labels, e.g. "18x24". OR semantics: any of the selected.
@@ -89,6 +104,7 @@ class ProductFilters:
             self.category_ids
             or self.brand
             or self.tags
+            or self.slugs
             or self.materials
             or self.sizes
             or self.min_price is not None
@@ -100,14 +116,21 @@ class ProductFilters:
         )
 
 
-def _order_by(sort: SortKey, has_search: bool) -> list[Any]:
-    """Build the ORDER BY clause.
+def _slug_order(slugs: Sequence[str]) -> list[Any]:
+    """Order by the position of each slug in the caller's list.
 
-    Every ordering is fully deterministic: a tie on the sort key is broken by
-    ``id``. Without the tiebreak, PostgreSQL may return equal rows in a
-    different order between two requests, and a customer paging through results
-    sees an item twice and misses another.
+    A curated page (industry picks, a blog's product references) links products
+    in a deliberate order. Sorting by ``price`` or ``newest`` would silently
+    reorder the editor's work, so an explicit slug list takes precedence over
+    the requested sort.
     """
+    ordered = func.array_position(
+        cast(list(slugs), ARRAY(String)).cast(Text), Product.slug.cast(Text)
+    )
+    return [ordered, Product.id.asc()]
+
+
+def _order_by(sort: SortKey, has_search: bool) -> list[Any]:
     if sort == "price_asc":
         return [Product.price_min.asc().nulls_last(), Product.id.asc()]
     if sort == "price_desc":
@@ -144,6 +167,9 @@ def _apply_filters(stmt: Select[Any], filters: ProductFilters) -> Select[Any]:
 
     if filters.brand:
         conditions.append(func.lower(Product.brand) == filters.brand.strip().lower())
+
+    if filters.slugs:
+        conditions.append(Product.slug.in_(list(filters.slugs)))
 
     if filters.tags:
         # Products carrying *all* of the requested tags. `product_tags` is
@@ -263,6 +289,10 @@ async def list_products(
     order = _order_by(filters.sort, bool(filters.search))
     if filters.sort == "relevance" and not filters.search:
         order = _order_by("newest", False)
+    if filters.slugs:
+        # An explicit slug list is a curated, ordered selection; the caller's
+        # ordering wins over the requested sort.
+        order = _slug_order(filters.slugs)
 
     stmt = (
         base.options(

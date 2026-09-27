@@ -141,6 +141,15 @@ async def list_products(
     category: Annotated[list[str] | None, Query()] = None,
     brand: Annotated[list[str] | None, Query()] = None,
     tag: Annotated[list[str] | None, Query()] = None,
+    slug: Annotated[
+        list[str] | None,
+        Query(
+            description=(
+                "Explicit product slugs, returned in the order given. "
+                "For curated pages (industry picks, blog references). Repeatable."
+            )
+        ),
+    ] = None,
     material: Annotated[
         list[str] | None,
         Query(description="Material code, e.g. '3MM ACP'. Repeatable."),
@@ -158,6 +167,7 @@ async def list_products(
 ) -> Page[ProductCardResponse]:
     filters = ProductFilters(
         tags=tuple(t.lower().strip() for t in (tag or []) if t.strip()),
+        slugs=tuple(s.strip() for s in (slug or []) if s.strip()),
         materials=tuple(m.strip() for m in (material or []) if m.strip()),
         sizes=tuple(s.strip() for s in (size or []) if s.strip()),
         min_price=min_price,

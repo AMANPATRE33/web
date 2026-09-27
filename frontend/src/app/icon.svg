@@ -1,0 +1,25 @@
+<!--
+  App icon.
+
+  The warning-triangle mark, in the site's own safety-amber-on-ink palette, with
+  the exclamation reduced to a single bar so it survives being rendered at
+  16x16 in a browser tab. A detailed pictogram would turn to mush at that size;
+  a triangle with a bar does not.
+
+  The live site publishes no logo asset, so this is our own mark rather than a
+  reproduction of anything. `docs/REFERENCE_SITE_ANALYSIS.md` records the brand
+  colours verified from the reference.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Safety Poster Prints">
+  <rect width="32" height="32" fill="#0b0d10" />
+  <!-- Triangle: the ISO 7010 W001 general-warning shape. -->
+  <path
+    d="M16 5.2 3.6 25.4a1.2 1.2 0 0 0 1 1.8h22.8a1.2 1.2 0 0 0 1-1.8L16 5.2Z"
+    fill="none"
+    stroke="#ffc800"
+    stroke-width="2.6"
+    stroke-linejoin="round"
+  />
+  <rect x="15" y="12" width="2.1" height="7.4" rx="1" fill="#ffc800" />
+  <circle cx="16.05" cy="22.3" r="1.35" fill="#ffc800" />
+</svg>
