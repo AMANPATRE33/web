@@ -12,22 +12,41 @@ from pathlib import Path
 
 import pytest
 from app.core.errors import InsufficientStockError
-from app.models.catalog import ProductVariant
 from app.models.enums import InventoryReason, ReservationStatus
 from app.models.orders import Order
 from app.services import inventory as inv
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
 async def _variant_with_stock(
     session: AsyncSession, *, quantity: int, reserved: int = 0
-) -> ProductVariant:
-    """Create a profile, product, variant and inventory row with exact stock.
+) -> uuid.UUID:
+    """Create a product, variant and inventory row with exact stock. Returns the id.
 
     Built in raw SQL because the ORM's product/variant construction pulls in
     triggers and generated columns that are irrelevant here; what matters is a
     precise `quantity`/`reserved` pair to race against.
+
+    **Returns a plain `uuid.UUID`, not the ORM object.** That is deliberate, and
+    it fixes a genuinely confusing failure.
+
+    These tests call `await session.rollback()` after a reservation is refused.
+    `rollback()` expires every instance in the session, unconditionally - unlike
+    `commit()`, which respects `expire_on_commit=False` and is configured to
+    leave attributes alone. So after a rollback the *next* read of
+    `variant.id` is a refresh SELECT, and in an async context that refresh is
+    attempted outside a greenlet:
+
+        MissingGreenlet: greenlet_spawn has not been called; can't call await_()
+        here? Was IO attempted in an unexpected place?
+
+    The traceback lands on the *argument* to a verification helper, several
+    lines below the reservation that caused it, which reads like a production
+    defect in the compensation path. It is not - the production path never
+    touches an ORM attribute here. The test was reading an attribute off an
+    instance it had rolled back, and holding the identifier avoids the entire
+    category.
     """
     profile_id = uuid.uuid4()
     category_id = uuid.uuid4()
@@ -119,9 +138,7 @@ async def _variant_with_stock(
         },
     )
     await session.commit()
-
-    result = await session.execute(select(ProductVariant).where(ProductVariant.id == variant_id))
-    return result.scalar_one()
+    return variant_id
 
 
 async def _profile(session: AsyncSession) -> uuid.UUID:
@@ -328,9 +345,11 @@ async def main(quantity, per_order, racers, mode):
             await s.execute(text(
                 "INSERT INTO profiles (id,email,full_name,role,is_active,"
                 "created_at,updated_at)"
-                " VALUES (:p,:e,'R','CUSTOMER',true,now(),now())"), {"p": pid, "e": f"{pid.hex}@e.com"})
+                " VALUES (:p,:e,'R','CUSTOMER',true,now(),now())"),
+                {"p": pid, "e": f"{pid.hex}@e.com"})
             await s.execute(text(
-                "INSERT INTO categories (id,name,slug,description,position,created_at,updated_at)"
+                "INSERT INTO categories (id,name,slug,description,position,"
+                "created_at,updated_at)"
                 " VALUES (:c,'C',:sl,'',0,now(),now())"), {"c": cid, "sl": f"c-{cid.hex[:8]}"})
             await s.execute(text(
                 "INSERT INTO products (id,title,slug,sku,description,category_id,base_price,"
@@ -381,8 +400,10 @@ async def main(quantity, per_order, racers, mode):
             async def race(oid):
                 async with mk() as s:
                     try:
-                        await inv.reserve(s, [inv.ReservationLine(variant_id=vid, quantity=per_order)],
-                                         order_id=oid, cart_id=None, ttl_seconds=900)
+                        await inv.reserve(
+                            s,
+                            [inv.ReservationLine(variant_id=vid, quantity=per_order)],
+                            order_id=oid, cart_id=None, ttl_seconds=900)
                         await s.commit(); return "won"
                     except InsufficientStockError:
                         await s.rollback(); return "lost"
@@ -491,7 +512,12 @@ if __name__ == "__main__":
         )
         assert len([r for r in results if r == "won"]) == 1, results
         assert all(r in ("won", "lost", "timeout") for r in results), results
-        assert quantity == 1 and reserved == 0 and available == 0
+        # reserve() *holds* stock; converting a hold into a sale is
+        # commit_reservations, which is not what this probe does. So the winner
+        # left 1 unit reserved and 0 sellable, and physical stock is untouched.
+        assert quantity == 1, "a hold must not touch physical stock"
+        assert reserved == 1, "the winner's unit is held, not yet sold"
+        assert available == 0
         assert available >= 0
 
 # ---------------------------------------------------------------------------
@@ -499,36 +525,36 @@ if __name__ == "__main__":
 # ---------------------------------------------------------------------------
 class TestReservation:
     async def test_reserve_then_commit_sells_the_stock(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         profile_id = uuid.uuid4()
         order = await _order_with_profile(session, profile_id)
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=3)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=3)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
         )
         await session.commit()
 
-        _, reserved, available = await _read_inventory(session, variant.id)
+        _, reserved, available = await _read_inventory(session, variant_id)
         assert reserved == 3 and available == 7, "a hold lowers available, not quantity"
 
         committed = await inv.commit_reservations(session, order.id)
         await session.commit()
         assert committed == 3
 
-        quantity, reserved, available = await _read_inventory(session, variant.id)
+        quantity, reserved, available = await _read_inventory(session, variant_id)
         assert (quantity, reserved, available) == (7, 0, 7), "commit turns a hold into a sale"
 
     async def test_reserve_then_release_returns_the_stock(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=4)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=4)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -537,41 +563,41 @@ class TestReservation:
         await session.commit()
 
         assert released == 4
-        quantity, reserved, available = await _read_inventory(session, variant.id)
+        quantity, reserved, available = await _read_inventory(session, variant_id)
         assert (quantity, reserved, available) == (10, 0, 10), "release must restore exactly"
 
     async def test_reserving_more_than_available_is_refused(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=3)
+        variant_id = await _variant_with_stock(session, quantity=3)
         order = await _order_with_profile(session, uuid.uuid4())
 
         with pytest.raises(InsufficientStockError):
             await inv.reserve(
                 session,
-                [inv.ReservationLine(variant_id=variant.id, quantity=4)],
+                [inv.ReservationLine(variant_id=variant_id, quantity=4)],
                 order_id=order.id,
                 cart_id=None,
                 ttl_seconds=900,
             )
         await session.rollback()
 
-        quantity, reserved, available = await _read_inventory(session, variant.id)
+        quantity, reserved, available = await _read_inventory(session, variant_id)
         assert available == 3, "a refused reservation must not move stock"
         assert reserved == 0, "a refused reservation must not leave a hold behind"
         assert quantity == 3, "a refused reservation must not touch physical stock"
 
     async def test_reserving_exactly_all_available_is_allowed(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=3)
+        variant_id = await _variant_with_stock(session, quantity=3)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=3)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=3)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
         )
         await session.commit()
-        _, _, available = await _read_inventory(session, variant.id)
+        _, _, available = await _read_inventory(session, variant_id)
         assert available == 0
 
     async def test_partial_reservation_is_rolled_back(self, session) -> None:
@@ -588,8 +614,8 @@ class TestReservation:
             await inv.reserve(
                 session,
                 [
-                    inv.ReservationLine(variant_id=plenty.id, quantity=5),
-                    inv.ReservationLine(variant_id=scarce.id, quantity=99),
+                    inv.ReservationLine(variant_id=plenty, quantity=5),
+                    inv.ReservationLine(variant_id=scarce, quantity=99),
                 ],
                 order_id=order.id,
                 cart_id=None,
@@ -597,20 +623,20 @@ class TestReservation:
             )
         await session.rollback()
 
-        _, reserved_plenty, available_plenty = await _read_inventory(session, plenty.id)
+        _, reserved_plenty, available_plenty = await _read_inventory(session, plenty)
         assert reserved_plenty == 0, "the first line must have been compensated"
         assert available_plenty == 10
-        _, _, available_scarce = await _read_inventory(session, scarce.id)
+        _, _, available_scarce = await _read_inventory(session, scarce)
         assert available_scarce == 1
 
     async def test_release_is_idempotent(self, session) -> None:
         """A replayed failure webhook must not release twice."""
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=4)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=4)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -622,16 +648,16 @@ class TestReservation:
 
         assert first == 4
         assert second == 0 and third == 0, "a second release is a no-op, not a refund of stock"
-        _, reserved, available = await _read_inventory(session, variant.id)
+        _, reserved, available = await _read_inventory(session, variant_id)
         assert (reserved, available) == (0, 10)
 
     async def test_commit_is_idempotent(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=2)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=2)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -640,7 +666,7 @@ class TestReservation:
         assert await inv.commit_reservations(session, order.id) == 0
         await session.commit()
 
-        quantity, reserved, available = await _read_inventory(session, variant.id)
+        quantity, reserved, available = await _read_inventory(session, variant_id)
         assert (quantity, reserved, available) == (8, 0, 8), "a replayed webhook sells once"
 
     async def test_double_reserve_of_the_same_line_is_a_database_error(
@@ -649,12 +675,12 @@ class TestReservation:
         """The partial unique index is the safety net, not a nicety."""
         from sqlalchemy.exc import IntegrityError
 
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=1)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=1)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -664,7 +690,7 @@ class TestReservation:
         with pytest.raises(IntegrityError):
             await inv.reserve(
                 session,
-                [inv.ReservationLine(variant_id=variant.id, quantity=1)],
+                [inv.ReservationLine(variant_id=variant_id, quantity=1)],
                 order_id=order.id,
                 cart_id=None,
                 ttl_seconds=900,
@@ -675,12 +701,12 @@ class TestReservation:
         """A customer who abandons the payment window must not hold stock forever."""
         from datetime import UTC, datetime, timedelta
 
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=3)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=3)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -694,23 +720,23 @@ class TestReservation:
             {"past": datetime.now(UTC) - timedelta(minutes=5), "oid": order.id},
         )
         await session.commit()
-        _, reserved, _ = await _read_inventory(session, variant.id)
+        _, reserved, _ = await _read_inventory(session, variant_id)
         assert reserved == 3
 
         released = await inv.expire_stale_reservations(session)
         await session.commit()
 
         assert released == 3
-        quantity, reserved, available = await _read_inventory(session, variant.id)
+        quantity, reserved, available = await _read_inventory(session, variant_id)
         assert (quantity, reserved, available) == (10, 0, 10)
 
     async def test_unexpired_holds_are_not_swept(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=10)
+        variant_id = await _variant_with_stock(session, quantity=10)
         order = await _order_with_profile(session, uuid.uuid4())
 
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=3)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=3)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -718,36 +744,36 @@ class TestReservation:
         await session.commit()
 
         assert await inv.expire_stale_reservations(session) == 0
-        _, reserved, _ = await _read_inventory(session, variant.id)
+        _, reserved, _ = await _read_inventory(session, variant_id)
         assert reserved == 3, "a live payment window must survive the sweeper"
 
     async def test_available_can_never_go_negative(self, session) -> None:
         """Belt and braces: the schema refuses it even under raw SQL."""
         from sqlalchemy.exc import IntegrityError
 
-        variant = await _variant_with_stock(session, quantity=5)
+        variant_id = await _variant_with_stock(session, quantity=5)
         with pytest.raises(IntegrityError):
             await session.execute(
                 text("UPDATE inventory SET reserved = 99 WHERE variant_id = :v"),
-                {"v": variant.id},
+                {"v": variant_id},
             )
         await session.rollback()
 
     async def test_available_reads_the_generated_column(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=8, reserved=3)
-        _, _, available = await _read_inventory(session, variant.id)
+        variant_id = await _variant_with_stock(session, quantity=8, reserved=3)
+        _, _, available = await _read_inventory(session, variant_id)
         assert available == 5, "available is quantity - reserved, computed by the database"
 
     async def test_reconcile_detects_a_ledger_mismatch(self, session) -> None:
         """Deliberately corrupt the ledger and prove the check notices."""
-        variant = await _variant_with_stock(session, quantity=5)
+        variant_id = await _variant_with_stock(session, quantity=5)
         await session.execute(
             text("DELETE FROM inventory_movements WHERE variant_id = :v"),
-            {"v": variant.id},
+            {"v": variant_id},
         )
         await session.commit()
 
-        verdict = await inv.reconcile(session, variant.id)
+        verdict = await inv.reconcile(session, variant_id)
         assert verdict["verdict"] == "MISMATCH", (
             "reconciliation must actually catch drift, not always report ok"
         )
@@ -755,11 +781,11 @@ class TestReservation:
         assert verdict["ledger_quantity"] == 0
 
     async def test_reconcile_passes_after_a_correct_sale(self, session) -> None:
-        variant = await _variant_with_stock(session, quantity=5)
+        variant_id = await _variant_with_stock(session, quantity=5)
         order = await _order_with_profile(session, uuid.uuid4())
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=2)],
+            [inv.ReservationLine(variant_id=variant_id, quantity=2)],
             order_id=order.id,
             cart_id=None,
             ttl_seconds=900,
@@ -767,30 +793,30 @@ class TestReservation:
         await inv.commit_reservations(session, order.id)
         await session.commit()
 
-        verdict = await inv.reconcile(session, variant.id)
+        verdict = await inv.reconcile(session, variant_id)
         assert verdict["verdict"] == "ok", (
             f"a correct sale must reconcile: {verdict}"
         )
 
     async def test_reservation_reason_is_recorded(self, session) -> None:
         """The ledger and the movement must agree on why stock moved."""
-        variant = await _variant_with_stock(session, quantity=5)
-        order = await _order_with_profile(session, uuid.uuid4())
+        variant_id = await _variant_with_stock(session, quantity=5)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
         await inv.reserve(
             session,
-            [inv.ReservationLine(variant_id=variant.id, quantity=1)],
-            order_id=order.id,
+            [inv.ReservationLine(variant_id=variant_id, quantity=1)],
+            order_id=order_id,
             cart_id=None,
             ttl_seconds=900,
         )
         await inv.release_reservations(
-            session, order.id, reason=InventoryReason.RELEASE, note="card declined"
+            session, order_id, reason=InventoryReason.RELEASE, note="card declined"
         )
         await session.commit()
 
         result = await session.execute(
             text("SELECT status, reason, note FROM inventory_reservations WHERE order_id = :o"),
-            {"o": order.id},
+            {"o": order_id},
         )
         row = result.first()
         assert row[0] == ReservationStatus.RELEASED.value
@@ -806,14 +832,14 @@ class TestReservation:
         """A hold with neither an order nor a cart is untraceable."""
         from sqlalchemy.exc import IntegrityError
 
-        variant = await _variant_with_stock(session, quantity=5)
+        variant_id = await _variant_with_stock(session, quantity=5)
         with pytest.raises(IntegrityError, match="reservation_has_holder"):
             await session.execute(
                 text(
                     "INSERT INTO inventory_reservations (id, variant_id, quantity, status, "
                     "reason, created_at) VALUES (:i, :v, 1, 'HELD', 'RESERVATION', now())"
                 ),
-                {"i": uuid.uuid4(), "v": variant.id},
+                {"i": uuid.uuid4(), "v": variant_id},
             )
         await session.rollback()
 
@@ -840,3 +866,349 @@ async def _order_with_profile(session: AsyncSession, profile_id: uuid.UUID) -> O
     session.add(order)
     await session.commit()
     return order
+
+# ---------------------------------------------------------------------------
+# Multi-line compensation
+# ---------------------------------------------------------------------------
+async def _held_count(session: AsyncSession, order_id: uuid.UUID) -> int:
+    """Reservations still HELD against an order. 0 means nothing leaked."""
+    result = await session.execute(
+        text(
+            "SELECT count(*) FROM inventory_reservations "
+            "WHERE order_id = :o AND status = 'HELD'"
+        ),
+        {"o": order_id},
+    )
+    return int(result.scalar_one())
+
+
+async def _reservation_rows(session: AsyncSession, order_id: uuid.UUID) -> list[tuple]:
+    result = await session.execute(
+        text(
+            "SELECT variant_id, quantity, status FROM inventory_reservations "
+            "WHERE order_id = :o ORDER BY created_at"
+        ),
+        {"o": order_id},
+    )
+    return list(result.fetchall())
+
+
+class TestCompensation:
+    """A multi-line reservation is all-or-nothing.
+
+    A partial hold is worse than a failed one: stock stays invisible to other
+    shoppers against an order that will never exist, and it stays that way until
+    a sweeper notices. So when any line is short, every line this call already
+    took must be given back.
+    """
+
+    async def test_a_single_sufficient_item_succeeds(self, session) -> None:
+        variant_id = await _variant_with_stock(session, quantity=10)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        held = await inv.reserve(
+            session,
+            [inv.ReservationLine(variant_id=variant_id, quantity=4)],
+            order_id=order_id,
+            cart_id=None,
+            ttl_seconds=900,
+        )
+        await session.commit()
+
+        assert len(held) == 1
+        assert await _held_count(session, order_id) == 1
+        _, reserved, available = await _read_inventory(session, variant_id)
+        assert (reserved, available) == (4, 6)
+
+    async def test_a_single_insufficient_item_is_refused(self, session) -> None:
+        variant_id = await _variant_with_stock(session, quantity=3)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [inv.ReservationLine(variant_id=variant_id, quantity=4)],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        assert await _held_count(session, order_id) == 0, "a refusal must hold nothing"
+        quantity, reserved, available = await _read_inventory(session, variant_id)
+        assert (quantity, reserved, available) == (3, 0, 3)
+
+    async def test_two_sufficient_items_are_both_held(self, session) -> None:
+        first = await _variant_with_stock(session, quantity=10)
+        second = await _variant_with_stock(session, quantity=10)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        held = await inv.reserve(
+            session,
+            [
+                inv.ReservationLine(variant_id=first, quantity=2),
+                inv.ReservationLine(variant_id=second, quantity=3),
+            ],
+            order_id=order_id,
+            cart_id=None,
+            ttl_seconds=900,
+        )
+        await session.commit()
+
+        assert len(held) == 2
+        assert await _held_count(session, order_id) == 2
+        _, r1, a1 = await _read_inventory(session, first)
+        _, r2, a2 = await _read_inventory(session, second)
+        assert (r1, a1) == (2, 8)
+        assert (r2, a2) == (3, 7)
+
+    async def test_a_third_insufficient_item_compensates_the_first_two(
+        self, session
+    ) -> None:
+        """The scenario from the brief, exactly: A and B hold, C is short."""
+        a = await _variant_with_stock(session, quantity=10)
+        b = await _variant_with_stock(session, quantity=10)
+        c = await _variant_with_stock(session, quantity=1)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=2),
+                    inv.ReservationLine(variant_id=b, quantity=3),
+                    inv.ReservationLine(variant_id=c, quantity=5),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        # No leaked reservations for this order.
+        assert await _held_count(session, order_id) == 0, (
+            "compensation must leave no HELD reservation behind"
+        )
+        # Every line back to its original state.
+        for variant_id, original in ((a, 10), (b, 10), (c, 1)):
+            quantity, reserved, available = await _read_inventory(session, variant_id)
+            assert (quantity, reserved, available) == (original, 0, original), (
+                f"variant {variant_id} was not fully restored: "
+                f"{(quantity, reserved, available)} != {(original, 0, original)}"
+            )
+
+    async def test_compensation_records_what_it_released(self, session) -> None:
+        """The released holds stay in the ledger, marked RELEASED.
+
+        Keeping them is what makes a leak reconcilable; deleting them would make
+        the history a lie.
+        """
+        a = await _variant_with_stock(session, quantity=10)
+        c = await _variant_with_stock(session, quantity=1)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=2),
+                    inv.ReservationLine(variant_id=c, quantity=9),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        rows = await _reservation_rows(session, order_id)
+        assert len(rows) == 1, "only the successful line should ever have been recorded"
+        variant_id, quantity, status = rows[0]
+        assert variant_id == a
+        assert quantity == 2
+        assert status == ReservationStatus.RELEASED.value
+
+    async def test_compensation_is_idempotent(self, session) -> None:
+        """Releasing an already-compensated order must not double-release."""
+        a = await _variant_with_stock(session, quantity=10)
+        c = await _variant_with_stock(session, quantity=1)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=2),
+                    inv.ReservationLine(variant_id=c, quantity=9),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        first = await inv.release_reservations(session, order_id)
+        second = await inv.release_reservations(session, order_id)
+        third = await inv.release_reservations(session, order_id)
+        await session.commit()
+
+        assert (first, second, third) == (0, 0, 0), (
+            "nothing is HELD after compensation, so a release must be a no-op"
+        )
+        quantity, reserved, available = await _read_inventory(session, a)
+        assert (quantity, reserved, available) == (10, 0, 10), (
+            "a repeated release must not return stock that was never held"
+        )
+
+    async def test_inventory_is_never_negative_after_a_failed_reservation(
+        self, session
+    ) -> None:
+        a = await _variant_with_stock(session, quantity=2)
+        b = await _variant_with_stock(session, quantity=2)
+        c = await _variant_with_stock(session, quantity=0)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=2),
+                    inv.ReservationLine(variant_id=b, quantity=2),
+                    inv.ReservationLine(variant_id=c, quantity=1),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        for variant_id in (a, b, c):
+            _, _, available = await _read_inventory(session, variant_id)
+            assert available >= 0, f"available went negative for {variant_id}"
+
+    async def test_four_items_where_the_last_fails(self, session) -> None:
+        a = await _variant_with_stock(session, quantity=5)
+        b = await _variant_with_stock(session, quantity=5)
+        c = await _variant_with_stock(session, quantity=5)
+        d = await _variant_with_stock(session, quantity=1)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=1),
+                    inv.ReservationLine(variant_id=b, quantity=2),
+                    inv.ReservationLine(variant_id=c, quantity=3),
+                    inv.ReservationLine(variant_id=d, quantity=4),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        assert await _held_count(session, order_id) == 0
+        for variant_id, original in ((a, 5), (b, 5), (c, 5), (d, 1)):
+            quantity, reserved, available = await _read_inventory(session, variant_id)
+            assert (quantity, reserved, available) == (original, 0, original)
+
+    async def test_the_middle_item_failing_also_compensates(self, session) -> None:
+        """Compensation is not a 'last line' special case."""
+        a = await _variant_with_stock(session, quantity=9)
+        b = await _variant_with_stock(session, quantity=1)
+        c = await _variant_with_stock(session, quantity=9)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=1),
+                    inv.ReservationLine(variant_id=b, quantity=5),
+                    inv.ReservationLine(variant_id=c, quantity=1),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+
+        assert await _held_count(session, order_id) == 0
+        for variant_id, original in ((a, 9), (b, 1), (c, 9)):
+            quantity, reserved, available = await _read_inventory(session, variant_id)
+            assert (quantity, reserved, available) == (original, 0, original)
+
+    async def test_the_session_stays_usable_after_a_refusal(self, session) -> None:
+        """A refusal must leave the session healthy enough to keep working."""
+        variant_id = await _variant_with_stock(session, quantity=5)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [inv.ReservationLine(variant_id=variant_id, quantity=99)],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.rollback()
+
+        # Same session, immediately afterwards.
+        held = await inv.reserve(
+            session,
+            [inv.ReservationLine(variant_id=variant_id, quantity=2)],
+            order_id=order_id,
+            cart_id=None,
+            ttl_seconds=900,
+        )
+        await session.commit()
+
+        assert len(held) == 1
+        _, reserved, available = await _read_inventory(session, variant_id)
+        assert (reserved, available) == (2, 3)
+
+    async def test_a_retry_after_compensation_is_not_blocked(self, session) -> None:
+        """The defect this suite was written to catch.
+
+        Compensation used to return the stock but leave the `InventoryReservation`
+        row `HELD`. The partial unique index over
+        `(order_id, variant_id) WHERE status = 'HELD'` then rejected the retry -
+        so a customer whose cart hit a stock-out could not re-attempt the very
+        same order, and would have been told "insufficient stock" forever for
+        stock that was sitting there sellable.
+
+        This is the regression guard: after a compensated failure, the same
+        order and the same variants must be reservable again.
+        """
+        a = await _variant_with_stock(session, quantity=10)
+        c = await _variant_with_stock(session, quantity=1)
+        order_id = (await _order_with_profile(session, uuid.uuid4())).id
+
+        with pytest.raises(InsufficientStockError):
+            await inv.reserve(
+                session,
+                [
+                    inv.ReservationLine(variant_id=a, quantity=2),
+                    inv.ReservationLine(variant_id=c, quantity=9),
+                ],
+                order_id=order_id,
+                cart_id=None,
+                ttl_seconds=900,
+            )
+        await session.commit()
+        assert await _held_count(session, order_id) == 0
+
+        # c is still short, but retrying `a` alone - the exact pair that failed
+        # before - must work rather than colliding with a leaked HELD row.
+        held = await inv.reserve(
+            session,
+            [inv.ReservationLine(variant_id=a, quantity=2)],
+            order_id=order_id,
+            cart_id=None,
+            ttl_seconds=900,
+        )
+        await session.commit()
+
+        assert len(held) == 1, "a retry after compensation must be allowed"
+        _, reserved, available = await _read_inventory(session, a)
+        assert (reserved, available) == (2, 8)

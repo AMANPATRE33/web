@@ -15,7 +15,7 @@
 | # | Scope item | Status |
 |---|---|---|
 | 1 | Server-side cart | **IMPLEMENTED + TESTED** |
-| 2 | Inventory reservation | **IMPLEMENTED + TESTED** (3 known failures, §10) |
+| 2 | Inventory reservation | **IMPLEMENTED + TESTED** (32 tests) |
 | 3 | Checkout | **NOT IMPLEMENTED** |
 | 4 | Orders | **NOT IMPLEMENTED** |
 | 5 | Razorpay payments | **NOT IMPLEMENTED** |
@@ -188,8 +188,8 @@ The `InsufficientStockError` `extra=` bug (B-1) was the most serious thing found
 | # | Severity | Location | Problem | Reason | Exact next action |
 |---|---|---|---|---|---|
 | **B-1** | **P0** | not started | No checkout, order creation, payment or webhook. | Phase 2 scope; not attempted. | Implement `POST /api/v1/checkout` that calls `price_cart`, writes an `orders` row with `order_items` snapshots, and reserves stock in the same transaction. Then the Razorpay intent endpoint. |
-| **B-2** | **P0** | `services/inventory.py` | `test_reserving_more_than_available_is_refused` and `test_partial_reservation_is_rolled_back` fail with `MissingGreenlet` in the compensation path. | `reserve()`'s except-handler releases already-held lines; the failure is a lazy load in that handler that I did not isolate. | Reproduce in isolation, then load the affected `Inventory` rows explicitly inside the handler rather than relying on a spent loader. **Do not merge with this failing.** |
-| **B-3** | **P0** | `services/inventory.py` | `test_the_service_itself_yields_one_winner` fails. | Same compensation path, reached through the service under concurrency. | Same fix as B-2; the two are almost certainly one defect. |
+| **B-2** | ~~P0~~ **FIXED** | `services/inventory.py` | ~~`test_reserving_more_than_available_is_refused` and `test_partial_reservation_is_rolled_back` fail with `MissingGreenlet` in the compensation path.~~ | Resolved. The `MissingGreenlet` was a test-harness defect (`session.rollback()` expires instances; the test read `variant.id` off an expired object). Writing the compensation tests then exposed a **real** defect alongside it: compensation returned the stock but left the `InventoryReservation` row `HELD`, which made a legitimate retry collide with the partial unique index. Both fixed. See §10a. | — |
+| **B-3** | ~~P0~~ **FIXED** | `services/inventory.py` | ~~`test_the_service_itself_yields_one_winner` fails.~~ | Resolved. The assertion demanded `reserved == 0`, but `reserve()` holds stock and does not sell it; `commit_reservations()` is the step that sells. `reserved == 1, available == 0` is correct. See §10a. | — |
 | **B-4** | **P1** | `frontend` | Cart is still `localStorage`-authoritative in the browser. | The API exists; the frontend has not been switched over. | Point `CartProvider` at `/api/v1/cart` via a server component, keeping `localStorage` only as an optimistic mirror. |
 | **B-5** | **P1** | not started | Order confirmation, order history, admin orders, invoice, email. | Not attempted. | Order snapshots in `order_items` already have columns for title, SKU, variant, attributes, unit price, discount, tax and total. |
 | **B-6** | **P1** | `.env` | **The company's GSTIN is still unpublished** (`docs/CONTENT_PENDING.md` §1.1). | The business has not supplied it. | Invoice issuance must stay blocked behind an explicit configuration check until it is supplied. **Do not invent it.** |
@@ -222,18 +222,134 @@ None of these were needed for what is built. All are needed before the unbuilt i
 
 ```
 tests/unit/test_pricing.py                      128 passed
-tests/integration/test_inventory_reservation.py 18 passed, 3 failed
+tests/integration/test_inventory_reservation.py  32 passed
 live cart exercise (55 checks)                   all passed
-pre-existing backend suite                       131 passed + 3 new schema tests passed
-frontend                                         untouched (173 unit, 40 browser)
+pre-existing backend suite                       134 passed
+frontend                                         173 unit passed, tsc 0, eslint 0, build OK
+
+FULL BACKEND SUITE: 293 passed, 0 failed, 0 skipped
 ```
 
-The 3 failures are B-2 and B-3 — one defect in the reservation compensation path, reached two ways. They are **not** workarounds and are not disabled or skipped. Until they pass, `services/inventory.py` should be treated as having an unverified failure path for multi-line reservations where a later line is short — which is the exact scenario a real cart produces when a customer adds three items and the third sells out.
+---
+
+## 10a. MissingGreenlet Reservation Fix
+
+### Root cause — two distinct defects, not one
+
+The three failures were **not** all the same bug, and one of them was not a
+production bug at all. Both were verified from full tracebacks rather than
+inferred.
+
+**1. Two `MissingGreenlet` failures were a test-harness defect.**
+
+The traceback pointed at a line reading `variant.id` — the *argument* to a
+verification helper, several lines below the reservation that had failed. It
+looked like the compensation path.
+
+It was not. `await session.rollback()` **expires every instance in the session,
+unconditionally** — unlike `commit()`, which is configured
+`expire_on_commit=False` in both the app's sessionmaker and the test suite's.
+So after a refused reservation was rolled back, the next read of `variant.id` was
+a refresh `SELECT`, and in an async context that refresh is attempted outside a
+greenlet:
+
+```
+MissingGreenlet: greenlet_spawn has not been called; can't call await_() here?
+Was IO attempted in an unexpected place?
+```
+
+The production compensation path never touches an ORM attribute: it iterates
+`ReservationResult` (a frozen dataclass of plain values) and calls
+`_release_one`, which uses only `session.execute()` and `session.add()`. Verified
+by reading the path end to end.
+
+Fix: `_variant_with_stock` now returns a plain `uuid.UUID` instead of the ORM
+object, so no test reads an attribute off a rolled-back instance. Documented in
+the helper, because the failure mode points somewhere other than its cause.
+
+**2. `test_the_service_itself_yields_one_winner` asserted the wrong thing.**
+
+`reserve()` **holds** stock; `commit_reservations()` is what turns a hold into a
+sale. The probe only holds, so `reserved == 1` and `available == 0` is the
+correct end state. The assertion demanded `reserved == 0` — the raw-SQL sibling
+test had already been corrected for exactly this and the service test was missed.
+
+### The real production bug the new tests found
+
+Writing the compensation tests the brief asked for immediately exposed an
+**actual defect in `services/inventory.py`**:
+
+> The compensation path lowered `inventory.reserved` but never marked the
+> `InventoryReservation` row `RELEASED`.
+
+The stock came back, so no quantity was wrong. But the ledger row stayed `HELD`,
+and that is a real problem rather than untidiness:
+
+* `uq_inventory_reservations_held_per_order_variant` — the partial unique index
+  over `(order_id, variant_id) WHERE status = 'HELD'` — would **reject a
+  legitimate retry** of the same order and variant. A customer whose cart hit a
+  stock-out could not re-attempt their own order, and would be told
+  "insufficient stock" indefinitely for stock that was sitting there sellable.
+* The expiry sweeper kept selecting a hold that no longer existed, so
+  `reconcile` would disagree with the ledger forever.
+
+### Fix
+
+`_reserve_one` now returns `(ReservationResult, InventoryReservation)`, and
+`reserve()`'s `except` handler closes **exactly the rows it created** — not a
+re-query by `order_id`, which could have closed an unrelated hold left by an
+earlier `reserve` call. The handler marks each row `RELEASED`, stamps
+`released_at`, records the reason, and flushes before re-raising.
+
+The conditional-UPDATE reservation mechanism is untouched. No
+`SELECT ... FOR UPDATE` was introduced, and the concurrency tests pass unchanged.
+
+### Tests added — `TestCompensation`
+
+| Scenario | Test |
+|---|---|
+| 1. one item sufficient | `test_a_single_sufficient_item_succeeds` |
+| 2. one item insufficient | `test_a_single_insufficient_item_is_refused` |
+| 3. two items succeed | `test_two_sufficient_items_are_both_held` |
+| 4. third item insufficient | `test_a_third_insufficient_item_compensates_the_first_two` |
+| 5. compensation releases previous holds | same, plus every line asserted back to its original `(quantity, reserved, available)` |
+| 6. compensation is idempotent | `test_compensation_is_idempotent` |
+| 7. inventory restored | asserted in 5, 8, 9, 10 |
+| 8. no active reservation remains | `test_compensation_records_what_it_released` (row present, `RELEASED`) |
+| 9. four items, last fails | `test_four_items_where_the_last_fails` |
+| 10. middle item fails too | `test_the_middle_item_failing_also_compensates` |
+| negative inventory impossible | `test_inventory_is_never_negative_after_a_failed_reservation` |
+| session stays usable | `test_the_session_stays_usable_after_a_refusal` |
+| **retry not blocked** | `test_a_retry_after_compensation_is_not_blocked` |
+
+The last one is the regression guard for the actual defect: after a compensated
+failure, the same order and variant must be reservable again. It fails against
+the pre-fix code and passes after.
+
+### Result
+
+`293 passed, 0 failed, 0 skipped`. No test was skipped, xfailed, or weakened;
+the two corrected assertions were corrected because they were **wrong**, and the
+wrong one is documented in §10a rather than quietly deleted.
 
 ---
 
 ## 11. Recommendation
 
-Do not build on `services/inventory.py` until B-2 and B-3 are fixed. Everything downstream — checkout, payment, orders — calls `reserve()`, and its multi-line failure path is the one a real cart hits most often. Fixing it first is cheaper than discovering it in production on a customer's partial stock-out.
+`services/inventory.py` is now sound on the paths the suite covers, including
+multi-line compensation. It is safe to build on.
 
-Then proceed in the order already specified: checkout → orders → Razorpay → webhook → confirmation → order history → admin. The schema for all of it exists; what is missing is the service and endpoint layer, and the transaction boundaries.
+Proceed in the order already specified: checkout → orders → Razorpay → webhook →
+confirmation → order history → admin. The schema for all of it exists; what is
+missing is the service and endpoint layer, and the transaction boundaries.
+
+Two things to carry forward:
+
+* **`reserve()`'s compensation closes only the rows it created.** That is
+  deliberate — a re-query by `order_id` would close an unrelated hold left by an
+  earlier call. Any new code that compensates must follow the same rule.
+* **The reservation expiry sweeper is not scheduled** (B-9). `reserve()` sets
+  `expires_at` from `payment_intent_ttl_seconds`, and
+  `expire_stale_reservations()` works and is tested, but no worker calls it.
+  Until one does, an abandoned Razorpay checkout keeps stock invisible to other
+  shoppers. Wire it up as part of the payment phase, not after it.

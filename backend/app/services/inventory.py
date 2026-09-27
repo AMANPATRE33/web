@@ -153,22 +153,26 @@ async def reserve(
     expires_at = now + timedelta(seconds=ttl_seconds) if ttl_seconds > 0 else None
 
     held: list[ReservationResult] = []
+    #: The ledger rows this call created, so compensation closes exactly these
+    #: holds and cannot touch an unrelated one.
+    created: list[InventoryReservation] = []
     try:
         for line in lines:
-            held.append(
-                await _reserve_one(
-                    session,
-                    line,
-                    order_id=order_id,
-                    cart_id=cart_id,
-                    expires_at=expires_at,
-                )
+            result, reservation = await _reserve_one(
+                session,
+                line,
+                order_id=order_id,
+                cart_id=cart_id,
+                expires_at=expires_at,
             )
+            held.append(result)
+            created.append(reservation)
     except InsufficientStockError:
         # Undo whatever we took, then let the original error stand. The
         # customer-facing message is about the item they wanted, not about our
         # internal cleanup.
-        for done in held:
+        now = datetime.now(UTC)
+        for done, reservation in zip(held, created, strict=True):
             await _release_one(
                 session,
                 done.variant_id,
@@ -177,6 +181,17 @@ async def reserve(
                 note="compensation: sibling line was short",
                 order_id=order_id,
             )
+            # The stock is returned above, but the *ledger row* also has to
+            # leave HELD. Leaving it HELD is a real defect, not untidiness: the
+            # partial unique index over (order_id, variant_id) WHERE status =
+            # 'HELD' would then reject a legitimate retry of the same order and
+            # variant, and the expiry sweeper would keep re-selecting a hold
+            # that no longer exists. A leaked HELD row is how a compensated
+            # reservation becomes an un-retryable one.
+            reservation.status = ReservationStatus.RELEASED
+            reservation.released_at = now
+            reservation.note = "compensation: sibling line was short"
+        await session.flush()
         raise
 
     logger.info(
@@ -196,7 +211,7 @@ async def _reserve_one(
     order_id: uuid.UUID | None,
     cart_id: uuid.UUID | None,
     expires_at: datetime | None,
-) -> ReservationResult:
+) -> tuple[ReservationResult, InventoryReservation]:
     """Reserve one variant with a single conditional UPDATE.
 
     The guard clause rejects the caller's own bad input before touching stock, so
@@ -263,10 +278,16 @@ async def _reserve_one(
     )
     await session.flush()
 
-    return ReservationResult(
-        variant_id=variant_id,
-        quantity=line.quantity,
-        available_after=int(available_after),
+    return (
+        ReservationResult(
+            variant_id=variant_id,
+            quantity=line.quantity,
+            available_after=int(available_after),
+        ),
+        # The row is returned as well as the result, so `reserve`'s compensation
+        # can mark *this* hold as RELEASED rather than re-querying by order_id
+        # and risking closing somebody else's hold.
+        reservation,
     )
 
 
