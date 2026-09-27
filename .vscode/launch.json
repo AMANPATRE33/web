@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json.schemastore.org/launch.json",
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "API (uvicorn, reload)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "uvicorn",
+        "app.main:app",
+        "--reload",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload-dir",
+        "app"
+      ],
+      "cwd": "${workspaceFolder}/backend",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "API: current test file",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/backend/.venv/Scripts/python.exe",
+      "args": ["-m", "pytest", "-q", "--pdb", "-p", "no:cacheprovider"],
+      "cwd": "${workspaceFolder}/backend",
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "justMyCode": false
+    },
+    {
+      "name": "Frontend (next dev)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/frontend",
+      "runtimeExecutable": "npm.cmd",
+      "runtimeArgs": ["run", "dev"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    },
+    {
+      "name": "Frontend: current test file (vitest)",
+      "type": "node",
+      "request": "launch",
+      "cwd": "${workspaceFolder}/frontend",
+      "runtimeExecutable": "npm.cmd",
+      "runtimeArgs": ["exec", "--", "vitest", "run", "--reporter=verbose"],
+      "console": "integratedTerminal",
+      "skipFiles": ["<node_internals>/**"]
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Full stack (API + frontend)",
+      "configurations": ["API (uvicorn, reload)", "Frontend (next dev)"],
+      "preLaunchTask": "infra: start Postgres + Redis",
+      "stopAll": true
+    }
+  ]
+}

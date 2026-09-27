@@ -71,6 +71,11 @@ blob-report/
 .vscode/*
 !.vscode/extensions.json
 !.vscode/settings.example.json
+# Committed on purpose: these hold no personal paths or secrets, they just encode
+# how to start the two services and run each test suite, and every new developer
+# otherwise has to rediscover the commands from the README.
+!.vscode/launch.json
+!.vscode/tasks.json
 .idea/
 *.swp
 *.swo
