@@ -40,14 +40,44 @@ $PgPort      = 55432
 $RedisPort   = 6379
 
 function Find-PostgresBin {
-    $candidates = Get-ChildItem 'C:\Program Files\PostgreSQL' -Directory -ErrorAction SilentlyContinue |
-        Sort-Object Name -Descending |
-        ForEach-Object { Join-Path $_.FullName 'bin' } |
-        Where-Object { Test-Path (Join-Path $_ 'initdb.exe') }
-    if (-not $candidates) {
+    <#
+    .SYNOPSIS
+        Returns the path to the newest PostgreSQL bin directory, as a string.
+
+    .DESCRIPTION
+        The `@(...)` wrapper is load-bearing, and its absence was a real bug.
+
+        A PowerShell pipeline that yields exactly ONE item is unrolled to a
+        scalar on assignment, so without the wrapper `$candidates` is a *string*
+        rather than an array. `$candidates[0]` then performs **character
+        indexing** on it and returns `[char]'C'` from `C:\Program Files\...`.
+
+        The result was a generated launcher reading
+
+            set "PATH=C;%PATH%"
+            "C\postgres.exe" -D ...
+
+        and PostgreSQL never started, reported as the misleading
+        "PostgreSQL did not open port 55432". It only manifests when exactly one
+        PostgreSQL install is present, which is why it survived: on a machine with
+        two versions the array survives un-unrolled and `[0]` behaves.
+
+        The sort is also version-aware rather than alphabetical. `Sort-Object Name
+        -Descending` compares strings, so `psqlODBC` sorts above `18` and a
+        hypothetical `9` would sort above `18`. Sorting on the parsed major
+        version picks the newest actual install.
+    #>
+    $candidates = @(
+        Get-ChildItem 'C:\Program Files\PostgreSQL' -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+$' } |
+            Sort-Object { [int]$_.Name } -Descending |
+            ForEach-Object { Join-Path $_.FullName 'bin' } |
+            Where-Object { Test-Path (Join-Path $_ 'initdb.exe') }
+    )
+    if ($candidates.Count -eq 0) {
         throw 'PostgreSQL binaries not found. Install PostgreSQL 14+ or point PG_BIN at an existing bin directory.'
     }
-    return $candidates[0]
+    return [string]$candidates[0]
 }
 
 function Get-RedisDir {
@@ -60,19 +90,112 @@ function Get-RedisDir {
 
 function Invoke-Schtasks {
     param([string]$TaskName, [string]$Command, [switch]$Remove)
-    schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
-    if ($Remove) { return }
-    schtasks /create /tn $TaskName /tr $Command /sc once /st 23:59 /it /f | Out-Null
-    schtasks /run /tn $TaskName | Out-Null
+
+    # Clearing a stale task is deliberate housekeeping, and on a first run the
+    # task does not exist at all. That is a *normal* outcome, not a failure - but
+    # the script runs with $ErrorActionPreference = 'Stop', and a native command
+    # writing to stderr becomes an error record, so an un-tolerated
+    # `schtasks /delete` on a missing task aborts the whole script before it can
+    # create anything. Cold start failed for exactly that reason.
+    #
+    # So the preference is relaxed only around these calls, and restored after.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
+        if ($Remove) { return }
+        schtasks /create /tn $TaskName /tr $Command /sc once /st 23:59 /it /f | Out-Null
+        schtasks /run /tn $TaskName | Out-Null
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
+}
+
+function Test-PortOpen {
+    <#
+    .SYNOPSIS
+        Returns $true if something is listening on a local TCP port.
+
+    .DESCRIPTION
+        Uses a raw TcpClient rather than Test-NetConnection, for two reasons.
+
+        1. Correctness. `(Test-NetConnection ...).TcpTestSucceeded` is a
+           **parse error** in Windows PowerShell 5.1 - the parenthesised command
+           is parsed as a statement and `.TcpTestSucceeded` as a separate one, so
+           the script dies with "Missing statement block after if ( condition )".
+           This machine has 5.1 and no pwsh, so `local-services.ps1 start` did not
+           run at all. Assigning the result to a variable first would also fix the
+           parse, but see (2).
+
+        2. Speed. Test-NetConnection takes one to two seconds per call, and
+           Wait-Port polls every 500ms, so the startup wait was dominated by
+           probing rather than by the database actually coming up. A TcpClient
+           connect against localhost either succeeds immediately or is refused
+           immediately, which is exactly the answer a readiness check needs.
+    #>
+    param([Parameter(Mandatory)][int]$Port, [int]$TimeoutMs = 400)
+    $client = New-Object System.Net.Sockets.TcpClient
+    try {
+        $connect = $client.BeginConnect('127.0.0.1', $Port, $null, $null)
+        if (-not $connect.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return $false
+        }
+        $client.EndConnect($connect)
+        return $true
+    }
+    catch {
+        return $false
+    }
+    finally {
+        $client.Close()
+    }
 }
 
 function Wait-Port {
     param([int]$Port, [int]$TimeoutSeconds = 30)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     while ((Get-Date) -lt $deadline) {
-        if (Test-NetConnection -ComputerName 127.0.0.1 -Port $Port -WarningAction SilentlyContinue).TcpTestSucceeded {
+        if (Test-PortOpen -Port $Port) {
             return $true
         }
+        Start-Sleep -Milliseconds 500
+    }
+    return $false
+}
+
+function Wait-PostgresReady {
+    <#
+    .SYNOPSIS
+        Blocks until PostgreSQL accepts connections, or the timeout expires.
+
+    .DESCRIPTION
+        A TCP port check is not readiness. Postgres opens the socket during
+        startup and only begins accepting connections a moment later, so
+        `Wait-Port` returns while the server still answers
+
+            FATAL: the database system is starting up
+
+        which made the bootstrap `psql` call fail and - because the script runs
+        with $ErrorActionPreference = 'Stop' - aborted the run before Redis was
+        even started. `pg_isready` asks the actual question.
+
+        Uses a short per-attempt timeout rather than the default so a hung probe
+        cannot consume the whole budget on the first try.
+
+        The 180-second default is not slack for its own sake. If the previous
+        process was killed rather than shut down cleanly - which is what
+        `Stop-Process -Force` does - the next start has to replay the write-ahead
+        log, and on a slow disk that fsync was measured at ~54 s here. Sixty
+        seconds turned a legitimate recovery into "never became ready", and then
+        the next start had to recover from *that* one too.
+    #>
+    param([string]$PgBin, [int]$Port, [int]$TimeoutSeconds = 180)
+    $isready = Join-Path $PgBin 'pg_isready.exe'
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    while ((Get-Date) -lt $deadline) {
+        & $isready -h 127.0.0.1 -p $Port -t 3 -q 2>$null
+        if ($LASTEXITCODE -eq 0) { return $true }
         Start-Sleep -Milliseconds 500
     }
     return $false
@@ -132,15 +255,39 @@ set "PATH=$pgBin;%PATH%"
 "@ | Set-Content -Path $launcher -Encoding ASCII
 
     Invoke-Schtasks -TaskName $PgTaskName -Command "`"$launcher`""
-    if (Wait-Port -Port $PgPort) {
-        Write-Host "PostgreSQL ready on 127.0.0.1:$PgPort" -ForegroundColor Green
-    } else {
+    if (-not (Wait-Port -Port $PgPort)) {
         throw "PostgreSQL did not open port $PgPort. See $logDir\postgres.log"
     }
+    # The port is open; the server may still be starting. Ask pg_isready before
+    # running any SQL against it.
+    if (-not (Wait-PostgresReady -PgBin $pgBin -Port $PgPort)) {
+        throw ("PostgreSQL opened port $PgPort but never became ready. See $logDir\postgres.log. " +
+               "If the log shows 'automatic recovery in progress', the previous process was killed " +
+               "rather than shut down, and replaying the write-ahead log can take a minute or more.")
+    }
+    Write-Host "PostgreSQL ready on 127.0.0.1:$PgPort" -ForegroundColor Green
 
-    # Apply the bootstrap SQL on a fresh cluster.
+    # Apply the bootstrap SQL. It is deliberately re-runnable, so on every start
+    # after the first it emits harmless `NOTICE ... already exists, skipping`
+    # lines - and psql writes NOTICE to stderr. Under $ErrorActionPreference =
+    # 'Stop' that aborted the script *after* PostgreSQL was already up, so Redis
+    # was never started and a working database was reported as a failed start.
+    #
+    # The exit code is still checked, so a real SQL error is not swallowed: only
+    # the stream routing is relaxed.
     $env:PGPASSWORD = ''
-    & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $PgPort -U postgres -d postgres -q -f (Join-Path $LocalDir 'bootstrap-db.sql') 2>&1 | Out-Null
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        & (Join-Path $pgBin 'psql.exe') -h 127.0.0.1 -p $PgPort -U postgres -d postgres `
+            -q -v ON_ERROR_STOP=1 -f (Join-Path $LocalDir 'bootstrap-db.sql') 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Bootstrap SQL failed. Re-run scripts/local-services.ps1 destroy then start, or apply .local\bootstrap-db.sql by hand."
+        }
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 function Start-Redis {
@@ -161,13 +308,23 @@ function Start-Redis {
 
 function Stop-ServiceTask {
     param([string]$TaskName)
-    schtasks /end /tn $TaskName 2>&1 | Out-Null
-    schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
+    # Same reasoning as Invoke-Schtasks: ending a task that is not there is the
+    # normal case when the services were started some other way, and must not
+    # abort a `stop`.
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        schtasks /end /tn $TaskName 2>&1 | Out-Null
+        schtasks /delete /tn $TaskName /f 2>&1 | Out-Null
+    }
+    finally {
+        $ErrorActionPreference = $previous
+    }
 }
 
 function Show-Status {
-    $pgUp = (Test-NetConnection -ComputerName 127.0.0.1 -Port $PgPort -WarningAction SilentlyContinue).TcpTestSucceeded
-    $redisUp = (Test-NetConnection -ComputerName 127.0.0.1 -Port $RedisPort -WarningAction SilentlyContinue).TcpTestSucceeded
+    $pgUp = Test-PortOpen -Port $PgPort
+    $redisUp = Test-PortOpen -Port $RedisPort
     Write-Host ("PostgreSQL  127.0.0.1:{0}  {1}" -f $PgPort, $(if ($pgUp) { 'UP' } else { 'DOWN' }))
     Write-Host ("Redis       127.0.0.1:{0}  {1}" -f $RedisPort, $(if ($redisUp) { 'UP' } else { 'DOWN' }))
     Write-Host ""
