@@ -258,6 +258,75 @@ async def get_current_admin(
     return user
 
 
+async def require_safe_write(request: Request) -> None:
+    """Guard a state-changing request that may come from an anonymous visitor.
+
+    ## Why this exists separately from ``require_csrf``
+
+    The double-submit check needs a CSRF cookie, and an anonymous visitor has
+    none - so ``require_csrf`` (which chains off ``get_current_user``) rejects
+    every guest write, and a guest cart becomes read-only. That is a real bug,
+    not a theoretical one: a shopper who has not signed in must be able to build
+    a basket.
+
+    The threat is also smaller here. Forcing a cross-origin page to mutate an
+    anonymous cart achieves nothing an attacker wants: the cart belongs to
+    whoever holds the cookie, the worst outcome is a stranger's basket gaining
+    an item, and no money or data moves.
+
+    So anonymous writes are guarded by **origin**, which is the correct control
+    for a request with no ambient authority:
+
+    * ``Sec-Fetch-Site: cross-site`` is rejected outright. Every current browser
+      sends it and it cannot be forged by page script, because it is set by the
+      browser, not by ``fetch``.
+    * An ``Origin`` that is not in the allowlist is rejected.
+    * A write with *neither* header is allowed, because a same-origin
+      non-browser client (curl, a server-to-server call) sends neither and
+      refusing it would break legitimate integrations without adding safety -
+      such a client is not a browser, so it is not subject to CSRF.
+
+    Authenticated writes still go through the full double-submit check, which is
+    the stronger control and is unchanged.
+    """
+    if request.method.upper() not in CSRF_PROTECTED_METHODS:
+        return
+
+    fetch_site = request.headers.get("sec-fetch-site", "").strip().lower()
+    if fetch_site == "cross-site":
+        logger.warning(
+            "cross_site_write_blocked",
+            path=request.url.path,
+            method=request.method,
+        )
+        raise ForbiddenError(
+            "This request came from another site and was blocked.",
+            code="cross_site_write_blocked",
+        )
+
+    origin = request.headers.get("origin")
+    if not origin:
+        # Not a browser form/fetch. No ambient authority to abuse.
+        return
+
+    settings = get_settings()
+    allowed = set(settings.cors_origin_list)
+    if origin not in allowed:
+        logger.warning(
+            "bad_origin_write_blocked",
+            origin=origin,
+            path=request.url.path,
+        )
+        raise ForbiddenError(
+            "This request came from an unrecognised origin and was blocked.",
+            code="bad_origin",
+        )
+
+
+#: For writes that a signed-out visitor must be able to perform, i.e. the cart.
+SafeWrite = Annotated[None, Depends(require_safe_write)]
+
+
 # Convenient aliases for route signatures.
 OptionalUser = Annotated[CurrentUser | None, Depends(get_optional_user)]
 AuthUser = Annotated[CurrentUser, Depends(get_current_user)]

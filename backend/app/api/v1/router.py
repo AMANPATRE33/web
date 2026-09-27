@@ -13,6 +13,7 @@ from fastapi import APIRouter
 from app import __version__
 from app.api.v1.account import router as account_router
 from app.api.v1.admin_users import router as admin_users_router
+from app.api.v1.cart import router as cart_router
 from app.api.v1.catalog import router as catalog_router
 from app.api.v1.content import router as content_router
 
@@ -43,7 +44,8 @@ async def api_index() -> dict[str, Any]:
 # --- public catalogue -------------------------------------------------------
 router.include_router(catalog_router, tags=["catalog"])
 
-# --- public content: industries and blog (read-only) -----------------------
+# --- cart (guest cookie or authenticated) ---------------------------------
+router.include_router(cart_router)
 router.include_router(content_router, tags=["content"])
 
 # --- account (customer self-service) ---------------------------------------

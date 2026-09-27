@@ -373,6 +373,28 @@ def compute_totals(
 
     subtotal = sum(line.line_total for line in lines)
 
+    # An empty cart is worth zero. Not "zero goods plus the shipping rate" -
+    # that is what the naive path produces, and it means the header badge's cart
+    # shows a shopper a Rs.99 total for a basket they have not filled yet, and
+    # that checkout is chargeable before a single item is in it.
+    if not lines or subtotal <= 0:
+        return Totals(
+            subtotal=0,
+            discount_total=0,
+            shipping_total=0,
+            tax_total=0,
+            total=0,
+            taxable_amount=0,
+            tax_rate_bps=rate_to_bps(settings.tax_rate),
+            tax_inclusive=settings.tax_mode == "inclusive",
+            tax_split_mode=_configured_split_mode(settings),
+            igst=0,
+            cgst=0,
+            sgst=0,
+            item_count=0,
+            shipping=None,
+        )
+
     # A discount can never exceed the goods it discounts; clamping here means a
     # miscalculated coupon degrades to "free goods, no negative total" instead of
     # a negative payable amount.
