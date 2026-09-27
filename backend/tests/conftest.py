@@ -231,6 +231,111 @@ def unique_suffix() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Read-only catalogue fixtures
+# ---------------------------------------------------------------------------
+# The seeded catalogue is 105 products and ~1,400 variants. Re-seeding that for
+# every test turns a 20-second suite into a 10-minute one, and the catalogue is
+# immutable as far as read tests are concerned. So it is seeded ONCE per session
+# and read through a short-lived session. Tests that mutate the catalogue should
+# use the per-test ``session`` fixture instead.
+@pytest.fixture(scope="session")
+def seeded_catalogue(test_database_url: str) -> None:
+    """Seed the read-only catalogue once per session.
+
+    Synchronous on purpose. A session-scoped *async* fixture would need a
+    session-scoped event loop, which conflicts with the function-scoped loop the
+    rest of the suite uses; driving one ``asyncio.run`` here avoids changing the
+    loop policy for everything else.
+    """
+    import asyncio
+    import tempfile
+    from pathlib import Path
+
+    from app.scripts.seed import Seeder
+
+    async def _seed() -> None:
+        engine = create_async_engine(test_database_url)
+        factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+        tmp = Path(tempfile.mkdtemp(prefix="storefront-seed-"))
+        try:
+            async with factory() as sess:
+                tables = ", ".join(f'"{n}"' for n in Base.metadata.tables)
+                async with engine.begin() as conn:
+                    await conn.exec_driver_sql(f"TRUNCATE {tables} RESTART IDENTITY CASCADE")
+                seeder = Seeder(sess, tmp)
+                await seeder.seed_categories()
+                await seeder.seed_tags()
+                await seeder.seed_products()
+                await seeder.seed_industries()
+                await seeder.seed_shipping()
+                await seeder.seed_coupons()
+                await sess.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(_seed())
+
+
+@pytest.fixture
+async def catalogue_client(test_database_url: str, seeded_catalogue: None):
+    """Client bound to the once-seeded catalogue, with a clean DB per request."""
+    from app.api import deps as deps_module
+    from app.core.security import SupabaseTokenVerifier
+    from app.db.session import get_db
+    from app.main import create_app
+
+    engine = create_async_engine(test_database_url)
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+
+    async def _override_get_db():
+        async with factory() as sess:
+            yield sess
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _override_get_db
+    verifier = SupabaseTokenVerifier(
+        Settings(
+            app_env="development",
+            database_url=SecretStr(test_database_url),
+            supabase_jwt_secret=SecretStr(TEST_JWT_SECRET),
+            jwt_secret=SecretStr(TEST_INTERNAL_SECRET),
+            cors_origins="http://localhost:3000",
+        )
+    )
+    app.dependency_overrides[deps_module.get_token_verifier] = lambda: verifier
+
+    async with AsyncClient(
+        transport=ASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        client.app_instance = app  # type: ignore[attr-defined]
+        yield client
+
+    app.dependency_overrides.clear()
+    await verifier.aclose()
+    await engine.dispose()
+
+
+@pytest.fixture
+async def catalogue_session(test_database_url: str, seeded_catalogue: None):
+    """A session over the shared seeded catalogue, with **no** truncation.
+
+    Paired with ``catalogue_client`` for read-only assertions, and for the rare
+    test that needs to mutate catalogue state without destroying the fixture
+    for everything that runs after it.
+    """
+    engine = create_async_engine(test_database_url)
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as sess:
+        try:
+            yield sess
+        finally:
+            if sess.in_transaction():
+                await sess.rollback()
+            await sess.close()
+    await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
 # Auth fixtures for API tests
 # ---------------------------------------------------------------------------
 #: Matches .env.example's local value. Tests mint HS256 tokens with it, which

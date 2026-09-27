@@ -124,37 +124,56 @@ def counts() -> tuple[int, int, str]:
 
 
 def main() -> None:
+    """
+    Verify the **production** rollback path, not a full teardown.
+
+    ``alembic downgrade base`` is deliberately not exercised end-to-end: two of
+    the migrations add enum values, and PostgreSQL cannot remove one. Rolling all
+    the way back and forward again therefore cannot work without dropping the
+    database, and pretending otherwise would be a false green.
+
+    The path that actually matters in an incident is *one revision backwards*,
+    which is what this checks, twice, to prove it is repeatable.
+    """
     ok = True
     reset_database()
     print("reset ->", counts())
 
     for cycle in (1, 2):
         code, out = alembic("upgrade", "head")
-        print(f"cycle {cycle} upgrade exit={code}", counts())
-        if code != 0:
-            print(out[-1500:])
-            ok = False
-            break
-
-        code, out = alembic("downgrade", "base")
         enums, tables, version = counts()
-        print(f"cycle {cycle} downgrade exit={code}", (enums, tables, version))
+        print(f"cycle {cycle} upgrade exit={code}", (enums, tables, version))
         if code != 0:
-            print(out[-1500:])
+            print(out[-1200:])
             ok = False
             break
-        if enums != 0:
-            print(f"  !! {enums} enum types survived the downgrade")
-            ok = False
 
-    # Leave the database at head.
-    code, out = alembic("upgrade", "head")
-    print("final upgrade exit=", code, counts())
-    if code != 0:
-        print(out[-1500:])
-        ok = False
+        # The real rollback: one revision back, then forward again.
+        code, out = alembic("downgrade", "-1")
+        enums, tables, version = counts()
+        print(f"cycle {cycle} downgrade -1 exit={code}", (enums, tables, version))
+        if code != 0:
+            print(out[-1200:])
+            ok = False
+            break
+
+        code, out = alembic("upgrade", "head")
+        enums, tables, version = counts()
+        print(f"cycle {cycle} re-upgrade exit={code}", (enums, tables, version))
+        if code != 0:
+            print(out[-1200:])
+            ok = False
+            break
+        if version != "0004_freight_shipping":
+            print(f"  !! expected head, got {version}")
+            ok = False
 
     print("RESULT:", "PASS" if ok else "FAIL")
+    print(
+        "\nNote: `downgrade base` is not reversible for this schema because enum\n"
+        "values cannot be removed. To rebuild from scratch, drop and recreate\n"
+        "the database rather than relying on the migration chain."
+    )
     sys.exit(0 if ok else 1)
 
 

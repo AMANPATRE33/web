@@ -41,8 +41,8 @@ from app.models.enums import InventoryReason, ProductStatus, VariantStatus
 
 if TYPE_CHECKING:
     from app.models.commerce import CartItem, WishlistItem
+    from app.models.engagement import ProductRatingSummary, Review
     from app.models.orders import OrderItem
-    from app.models.review import Review
 
 
 class Category(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -166,6 +166,15 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     tags: Mapped[list[Tag]] = relationship(secondary="product_tags", lazy="selectin")
     reviews: Mapped[list[Review]] = relationship(back_populates="product", lazy="noload")
+    #: Pre-aggregated rating. Joined on every listing query, because computing
+    #: AVG(rating) over reviews per product card is the classic N+1 that makes a
+    #: listing page slow.
+    rating_summary: Mapped[ProductRatingSummary | None] = relationship(
+        back_populates="product",
+        lazy="joined",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
 
     #: Maintained by ``trg_products_price_min``. Never written by the app.
     price_min: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -180,10 +189,17 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     @property
     def discount_percent(self) -> int:
-        if not self.compare_at_price or self.compare_at_price <= self.base_price:
+        """Discount shown on a card.
+
+        Computed from ``price_min`` against ``compare_at_price`` rather than
+        ``base_price``, because in a size/material matrix the advertised floor
+        is the smallest variant's price. Using the unscaled base price would
+        report a discount the customer cannot actually buy at.
+        """
+        floor = self.price_min or self.base_price
+        if not self.compare_at_price or self.compare_at_price <= floor:
             return 0
-        reference = self.compare_at_price or self.base_price
-        return round((reference - self.base_price) * 100 / reference)
+        return round((self.compare_at_price - floor) * 100 / self.compare_at_price)
 
     def effective_price(self) -> int:
         return self.price_min or self.base_price
@@ -219,6 +235,32 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         Index("ix_product_variants_product_id", "product_id"),
         Index("ix_product_variants_product_id_status", "product_id", "status"),
         Index("ix_product_variants_sku_lookup", "sku", unique=True),
+        # Material and Size live in the attributes JSONB so the schema stays
+        # generic, but they are *filtered on constantly* and an equality
+        # predicate against JSONB is not indexable without help. These
+        # expression indexes turn `attributes->>'Material' = '3MM ACP'` into a
+        # btree probe. The multi-column variant serves the very common
+        # "material + size" pair selection in one lookup.
+        Index(
+            "ix_product_variants_material",
+            text("(attributes ->> 'Material')"),
+        ),
+        Index(
+            "ix_product_variants_size",
+            text("(attributes ->> 'Size')"),
+        ),
+        Index(
+            "ix_product_variants_material_size",
+            text("(attributes ->> 'Material')"),
+            text("(attributes ->> 'Size')"),
+        ),
+        # Supports "which products exist in this material at all" for facets.
+        Index(
+            "ix_product_variants_attributes_gin",
+            "attributes",
+            postgresql_using="gin",
+            postgresql_ops={"attributes": "jsonb_path_ops"},
+        ),
     )
 
     product_id: Mapped[uuid.UUID] = mapped_column(
@@ -262,7 +304,12 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     @property
     def available_quantity(self) -> int:
-        return self.inventory.available_quantity if self.inventory else 0
+        """Sellable units for this variant.
+
+        Reads the generated ``inventory.available`` column, so this can never
+        disagree with the database's own view of stock.
+        """
+        return self.inventory.available if self.inventory else 0
 
     def effective_price(self) -> int:
         if self.price_override is not None:

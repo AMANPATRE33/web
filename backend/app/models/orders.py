@@ -78,6 +78,20 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "total = subtotal - discount_total + shipping_total + tax_total",
             name="total_consistent",
         ),
+        # A GSTIN is structurally 15 characters. Validating the shape at the
+        # database level means a malformed one can never reach an issued
+        # invoice, whatever the API layer allowed through.
+        CheckConstraint(
+            "gstin IS NULL OR gstin ~ '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][0-9A-Z]Z[0-9A-Z]$'",
+            name="gstin_format",
+        ),
+        # A business order must have something to invoice to.
+        CheckConstraint(
+            "NOT is_business_order OR company_name IS NOT NULL",
+            name="business_order_needs_company",
+        ),
+        CheckConstraint("taxable_amount >= 0", name="taxable_amount_non_negative"),
+        CheckConstraint("tax_rate_bps >= 0 AND tax_rate_bps <= 10000", name="tax_rate_in_range"),
         Index("ix_orders_profile_created", "profile_id", "created_at"),
         Index("ix_orders_status_created", "status", "created_at"),
         # Partial index for the fulfilment queue: only live orders, newest first.
@@ -173,6 +187,35 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     customer_note: Mapped[str | None] = mapped_column(String(500))
     #: Staff-only notes. Never returned by customer-facing endpoints.
     internal_note: Mapped[str | None] = mapped_column(Text)
+
+    # ---------------------------------------------------------------- B2B/GST
+    # India requires a GST invoice for business purchases. These are stored
+    # rather than derived so that the invoice which was actually issued can
+    # always be reproduced, even if the customer's tax details or the store's
+    # tax configuration change afterwards.
+    is_business_order: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+    company_name: Mapped[str | None] = mapped_column(String(200))
+    #: 15 characters: 2-digit state code, 10-char PAN, entity, literal Z, check.
+    gstin: Mapped[str | None] = mapped_column(String(15))
+    purchase_order_number: Mapped[str | None] = mapped_column(String(64))
+    #: Base the tax is computed on: subtotal - discount, excluding shipping.
+    taxable_amount: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        server_default="0",
+        comment="Minor units. subtotal - discount_total, shipping excluded.",
+    )
+    #: Rate actually applied, in basis points (1800 = 18.00%). Stored so a rate
+    #: change never rewrites a historical invoice.
+    tax_rate_bps: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1800")
+    #: Recorded per order because the store default can change over time.
+    tax_inclusive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    #: HSN code, required on a GST invoice for goods.
+    hsn_code: Mapped[str | None] = mapped_column(String(12))
+    #: Sequential per financial year, e.g. SPP/26-27/00042. Issued once, on
+    #: payment, and never reused.
+    invoice_number: Mapped[str | None] = mapped_column(String(40), unique=True)
+    invoice_issued_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     profile: Mapped[Profile] = relationship(back_populates="orders", lazy="joined")
     items: Mapped[list[OrderItem]] = relationship(

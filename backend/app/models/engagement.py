@@ -120,6 +120,8 @@ class ProductRatingSummary(Base):
         nullable=False,
     )
 
+    product: Mapped[Product] = relationship(back_populates="rating_summary")
+
 
 class NewsletterSubscriber(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "newsletter_subscribers"

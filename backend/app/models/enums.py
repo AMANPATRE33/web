@@ -124,6 +124,9 @@ class InventoryReason(StrEnum):
 class ShippingMethodCode(StrEnum):
     STANDARD = "STANDARD"
     EXPRESS = "EXPRESS"
+    #: Large ACP and pylon boards travel differently from an A4 sticker, and
+    #: routing them through a parcel courier is how a delivery goes wrong.
+    FREIGHT = "FREIGHT"
 
 
 class SubscriberStatus(StrEnum):
@@ -154,3 +157,30 @@ class OutboxStatus(StrEnum):
     PROCESSING = "PROCESSING"
     SENT = "SENT"
     FAILED = "FAILED"
+
+
+class QuoteStatus(StrEnum):
+    """Lifecycle of a B2B bulk quote.
+
+    The point of the workflow is that a bulk buyer is *not* forced through
+    checkout. They ask, staff quote, and only then does an order exist.
+    """
+
+    NEW = "NEW"
+    CONTACTED = "CONTACTED"
+    QUOTED = "QUOTED"
+    CONVERTED = "CONVERTED"
+    CLOSED = "CLOSED"
+
+
+#: Legal forward transitions. Staff may always close; reopening is a
+#: deliberate act because it changes someone's queue.
+QUOTE_TRANSITIONS: dict[QuoteStatus, frozenset[QuoteStatus]] = {
+    QuoteStatus.NEW: frozenset({QuoteStatus.CONTACTED, QuoteStatus.QUOTED, QuoteStatus.CLOSED}),
+    QuoteStatus.CONTACTED: frozenset({QuoteStatus.QUOTED, QuoteStatus.CLOSED}),
+    QuoteStatus.QUOTED: frozenset(
+        {QuoteStatus.CONVERTED, QuoteStatus.CONTACTED, QuoteStatus.CLOSED}
+    ),
+    QuoteStatus.CONVERTED: frozenset({QuoteStatus.CLOSED}),
+    QuoteStatus.CLOSED: frozenset({QuoteStatus.NEW}),
+}

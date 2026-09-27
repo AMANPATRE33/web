@@ -85,6 +85,10 @@ ignore = [
     "RUF001",
     "RUF002",
     "RUF003",
+    # PEP 695 type-parameter syntax would require Python 3.12+ at runtime and
+    # breaks the 3.12 floor this project supports for Alembic tooling.
+    "UP046",
+    "UP047",
 ]
 
 [tool.ruff.lint.per-file-ignores]

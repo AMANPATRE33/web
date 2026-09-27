@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="800" height="800"
+     viewBox="0 0 800 800" role="img" aria-label="Safety Poster Prints Think Safety Before You">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0%" stop-color="#1B1D21"/>
+      <stop offset="100%" stop-color="#0E0F12"/>
+    </linearGradient>
+    <filter id="drop" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="14" stdDeviation="18" flood-color="#000000"
+                    flood-opacity="0.45"/>
+    </filter>
+  </defs>
+
+  <rect width="800" height="800" fill="url(#bg)"/>
+  <rect width="800" height="800" fill="#FFFFFF" opacity="-0.030"/>
+
+  <g transform="translate(400 330) rotate(-6) scale(0.88) translate(-300 -300)"
+     filter="url(#drop)">
+    <rect x="80" y="60" width="440" height="500" rx="8"
+          fill="#0057B8" stroke="#003E80" stroke-width="10"/>
+    <rect x="104" y="84" width="392" height="452" rx="4"
+          fill="none" stroke="#FFFFFF" stroke-width="3" opacity="0.35"/>
+    <g transform="translate(0 10)" fill="none" stroke="#FFFFFF"
+       stroke-width="20" stroke-linecap="round" stroke-linejoin="round"
+       opacity="0.95">
+      <path d="M300,110 L450,170 L450,320 C450,400 380,470 300,500 C220,470 150,400 150,320 L150,170 Z"/>
+    </g>
+  </g>
+
+  <text x="40" y="60" font-family="ui-sans-serif, system-ui, sans-serif"
+        font-size="17" letter-spacing="3.2" fill="#FFFFFF" opacity="0.42">
+    PLACEHOLDER ARTWORK
+  </text>
+  <text x="760" y="60" text-anchor="end"
+        font-family="ui-sans-serif, system-ui, sans-serif" font-size="17"
+        letter-spacing="2.4" fill="#0057B8" opacity="0.7">
+    SAFETY POSTER PRINTS THINK S
+  </text>
+</svg>

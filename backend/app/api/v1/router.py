@@ -13,6 +13,7 @@ from fastapi import APIRouter
 from app import __version__
 from app.api.v1.account import router as account_router
 from app.api.v1.admin_users import router as admin_users_router
+from app.api.v1.catalog import router as catalog_router
 
 router = APIRouter()
 
@@ -36,6 +37,9 @@ async def api_index() -> dict[str, Any]:
         },
     }
 
+
+# --- public catalogue -------------------------------------------------------
+router.include_router(catalog_router, tags=["catalog"])
 
 # --- account (customer self-service) ---------------------------------------
 router.include_router(account_router, prefix="/account", tags=["account"])

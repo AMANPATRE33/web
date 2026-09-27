@@ -175,6 +175,22 @@ class Coupon(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         UniqueConstraint("code", name="uq_coupons_code"),
         CheckConstraint("value > 0 AND value <= 10000", name="percentage_basis_points_in_range"),
+        # The two coupon types store `value` in different units, so the bound
+        # has to be conditional rather than a single range: PERCENTAGE is basis
+        # points (1..10000 == 0.01%..100%), FIXED is minor units, which is
+        # routinely far above 10000. A single `value <= 10000` check rejects a
+        # perfectly ordinary "Rs. 500 off" coupon - which is exactly what the
+        # seed data exposed.
+        CheckConstraint(
+            "(coupon_type = 'PERCENTAGE' AND value > 0 AND value <= 10000) "
+            "OR (coupon_type = 'FIXED' AND value > 0)",
+            name="coupon_value_in_range_for_type",
+        ),
+        CheckConstraint(
+            "max_discount_amount IS NULL OR max_discount_amount > 0",
+            name="max_discount_positive",
+        ),
+        CheckConstraint("min_order_amount >= 0", name="min_order_amount_non_negative"),
         CheckConstraint(
             "usage_limit IS NULL OR usage_count < usage_limit", name="usage_under_limit"
         ),
