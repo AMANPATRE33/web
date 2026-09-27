@@ -72,6 +72,10 @@ class ProductFilters:
     category_ids: tuple[uuid.UUID, ...] = ()
     brand: str | None = None
     tags: tuple[str, ...] = ()
+    #: Material values, e.g. "3MM ACP". OR semantics: any of the selected.
+    materials: tuple[str, ...] = ()
+    #: Size labels, e.g. "18x24". OR semantics: any of the selected.
+    sizes: tuple[str, ...] = ()
     min_price: int | None = None
     max_price: int | None = None
     in_stock_only: bool = False
@@ -85,6 +89,8 @@ class ProductFilters:
             self.category_ids
             or self.brand
             or self.tags
+            or self.materials
+            or self.sizes
             or self.min_price is not None
             or self.max_price is not None
             or self.in_stock_only
@@ -162,24 +168,42 @@ def _apply_filters(stmt: Select[Any], filters: ProductFilters) -> Select[Any]:
 
     if filters.on_sale_only:
         conditions.append(Product.compare_at_price.is_not(None))
-        conditions.append(Product.compare_at_price > Product.base_price)
+        conditions.append(Product.compare_at_price > Product.price_min)
 
     if filters.featured_only:
         conditions.append(Product.is_featured.is_(True))
 
-    if filters.in_stock_only:
-        # Uses inventory.available, a generated column, so this stays a single
-        # indexable predicate instead of a join with arithmetic.
-        conditions.append(
-            select(ProductVariant.id)
-            .join(Inventory, Inventory.variant_id == ProductVariant.id)
-            .where(
-                ProductVariant.product_id == Product.id,
-                ProductVariant.status == VariantStatus.ACTIVE,
-                Inventory.available > 0,
-            )
-            .exists()
+    # ------------------------------------------------------------------
+    # Variant-level filters
+    # ------------------------------------------------------------------
+    # Material, Size and availability are all properties of a *single*
+    # variant row, so they are combined into ONE EXISTS. Emitting them as
+    # separate EXISTS clauses would cross-product: a product carrying
+    # (3MM ACP, 12x18) and (ECO VINYL, 18x24) would wrongly match a filter
+    # for material=3MM ACP *and* size=18x24, which is a combination the
+    # business does not actually sell.
+    variant_conditions: list[Any] = [
+        ProductVariant.product_id == Product.id,
+        ProductVariant.status == VariantStatus.ACTIVE,
+    ]
+
+    if filters.materials:
+        variant_conditions.append(
+            ProductVariant.attributes["Material"].astext.in_(list(filters.materials))
         )
+    if filters.sizes:
+        variant_conditions.append(ProductVariant.attributes["Size"].astext.in_(list(filters.sizes)))
+
+    needs_inventory = filters.in_stock_only
+    if filters.materials or filters.sizes or needs_inventory:
+        variant_query = select(ProductVariant.id)
+        if needs_inventory:
+            # `available` is a generated column, so this is an indexable
+            # predicate rather than arithmetic in the WHERE clause.
+            variant_query = variant_query.join(
+                Inventory, Inventory.variant_id == ProductVariant.id
+            ).where(Inventory.available > 0)
+        conditions.append(variant_query.where(*variant_conditions).exists())
 
     return stmt.where(and_(*conditions))
 
@@ -581,9 +605,43 @@ async def get_facets(
     )
     tags = [{"slug": row[0], "name": row[1], "count": int(row[2])} for row in tag_rows.all()]
 
+    # Material and Size facets. These are variant attributes, so they are
+    # aggregated from product_variants joined to the in-scope products. The
+    # counts are the number of *products* available in that option, which is
+    # what a shopper filtering a grid actually wants to know.
+    variant_scope = [Product.status == ProductStatus.ACTIVE]
+    if category_ids:
+        variant_scope.append(Product.category_id.in_(list(category_ids)))
+
+    material_rows = await session.execute(
+        select(
+            ProductVariant.attributes["Material"].astext.label("value"),
+            func.count(func.distinct(ProductVariant.product_id)),
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(*variant_scope, ProductVariant.status == VariantStatus.ACTIVE)
+        .group_by("value")
+        .order_by("value")
+    )
+    materials = [{"value": row[0], "count": int(row[1])} for row in material_rows.all() if row[0]]
+
+    size_rows = await session.execute(
+        select(
+            ProductVariant.attributes["Size"].astext.label("value"),
+            func.count(func.distinct(ProductVariant.product_id)),
+        )
+        .join(Product, Product.id == ProductVariant.product_id)
+        .where(*variant_scope, ProductVariant.status == VariantStatus.ACTIVE)
+        .group_by("value")
+        .order_by("value")
+    )
+    sizes = [{"value": row[0], "count": int(row[1])} for row in size_rows.all() if row[0]]
+
     return {
         "brands": brands,
         "tags": tags,
+        "materials": materials,
+        "sizes": sizes,
         "price_range": {
             "min": int(min_price) if min_price is not None else 0,
             "max": int(max_price) if max_price is not None else 0,

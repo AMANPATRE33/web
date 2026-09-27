@@ -141,6 +141,14 @@ async def list_products(
     category: Annotated[list[str] | None, Query()] = None,
     brand: Annotated[list[str] | None, Query()] = None,
     tag: Annotated[list[str] | None, Query()] = None,
+    material: Annotated[
+        list[str] | None,
+        Query(description="Material code, e.g. '3MM ACP'. Repeatable."),
+    ] = None,
+    size: Annotated[
+        list[str] | None,
+        Query(description="Size label, e.g. '18x24'. Repeatable."),
+    ] = None,
     min_price: Annotated[int | None, Query(ge=0, description="Minor units (paise)")] = None,
     max_price: Annotated[int | None, Query(ge=0, description="Minor units (paise)")] = None,
     in_stock: bool = False,
@@ -150,6 +158,8 @@ async def list_products(
 ) -> Page[ProductCardResponse]:
     filters = ProductFilters(
         tags=tuple(t.lower().strip() for t in (tag or []) if t.strip()),
+        materials=tuple(m.strip() for m in (material or []) if m.strip()),
+        sizes=tuple(s.strip() for s in (size or []) if s.strip()),
         min_price=min_price,
         max_price=max_price,
         in_stock_only=in_stock,

@@ -184,6 +184,123 @@ class TestProductFilters:
 
         assert both.json()["meta"]["total"] <= single.json()["meta"]["total"]
 
+
+class TestMaterialAndSizeFilters:
+    """
+    Material and Size are the filters a buyer uses most, and both are
+    properties of a *single* variant row. The risk guarded against here is the
+    two predicates being evaluated independently, which would cross-product: a
+    product carrying (3MM ACP, 12x18) and (ECO VINYL, 18x24) must not match a
+    filter for material=3MM ACP **and** size=18x24, because the business does
+    not sell that pairing.
+    """
+
+    async def test_material_filter_is_applied(self, catalogue_client: AsyncClient) -> None:
+        """
+        Every seeded product carries a 3MM ACP option, so this filter is not
+        expected to reduce the count on its own - only to be *applied*. What is
+        asserted is that it is applied, by checking that adding a scarce size
+        narrows the result further.
+        """
+        acp = await catalogue_client.get(
+            "/api/v1/products", params={"material": "3MM ACP", "per_page": 100}
+        )
+
+        assert acp.status_code == 200
+        assert acp.json()["meta"]["total"] > 0
+
+        # A genuinely scarce combination must return fewer rows.
+        acp_36 = await catalogue_client.get(
+            "/api/v1/products",
+            params={"material": "3MM ACP", "size": "36x48", "per_page": 100},
+        )
+        assert acp_36.json()["meta"]["total"] < acp.json()["meta"]["total"]
+
+    async def test_size_filter_restricts_results(self, catalogue_client: AsyncClient) -> None:
+        everything = await catalogue_client.get("/api/v1/products", params={"per_page": 100})
+        large = await catalogue_client.get(
+            "/api/v1/products", params={"size": "36x48", "per_page": 100}
+        )
+
+        assert 0 < large.json()["meta"]["total"] < everything.json()["meta"]["total"]
+
+    async def test_material_and_size_together_are_a_subset(
+        self, catalogue_client: AsyncClient
+    ) -> None:
+        material_only = await catalogue_client.get(
+            "/api/v1/products", params={"material": "3MM ACP", "per_page": 100}
+        )
+        both = await catalogue_client.get(
+            "/api/v1/products",
+            params={"material": "3MM ACP", "size": "36x48", "per_page": 100},
+        )
+
+        assert both.json()["meta"]["total"] <= material_only.json()["meta"]["total"], (
+            "adding a size filter widened the result set"
+        )
+
+    async def test_every_returned_product_really_has_that_variant(
+        self, catalogue_client: AsyncClient, catalogue_session: AsyncSession
+    ) -> None:
+        """
+        The strong form of the cross-product check: for every product the filter
+        returns, confirm one *single* variant row matches both values.
+        """
+        from app.models.catalog import Product, ProductVariant
+        from sqlalchemy import select
+
+        response = await catalogue_client.get(
+            "/api/v1/products",
+            params={"material": "3MM ACP", "size": "24x36", "per_page": 50},
+        )
+        slugs = [i["slug"] for i in response.json()["items"]]
+        assert slugs, "expected matches for this combination"
+
+        for slug in slugs:
+            product_result = await catalogue_session.execute(
+                select(Product).where(Product.slug == slug)
+            )
+            product = product_result.scalar_one()
+            variants_result = await catalogue_session.execute(
+                select(ProductVariant).where(ProductVariant.product_id == product.id)
+            )
+            variants = variants_result.scalars().all()
+
+            matches = [
+                v
+                for v in variants
+                if v.attributes.get("Material") == "3MM ACP" and v.attributes.get("Size") == "24x36"
+            ]
+            assert matches, f"{slug} was returned by the filter but has no 3MM ACP / 24x36 variant"
+
+    async def test_facets_expose_materials_and_sizes(self, catalogue_client: AsyncClient) -> None:
+        response = await catalogue_client.get("/api/v1/facets")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert {m["value"] for m in body["materials"]} == {
+            "3MM ACP",
+            "5MM FOAMSHEET",
+            "AUTOGLOW STICKER",
+            "ECO VINYL STICKER",
+        }
+        size_values = {s["value"] for s in body["sizes"]}
+        assert {"8x12", "12x18", "18x24", "24x36"} <= size_values
+        assert all(s["count"] > 0 for s in body["sizes"])
+
+    async def test_category_facets_are_scoped(self, catalogue_client: AsyncClient) -> None:
+        """Facets inside a category must not advertise options it does not sell."""
+        scoped = await catalogue_client.get("/api/v1/categories/office-signages/facets")
+        everywhere = await catalogue_client.get("/api/v1/facets")
+
+        scoped_sizes = {s["value"] for s in scoped.json()["sizes"]}
+        global_sizes = {s["value"] for s in everywhere.json()["sizes"]}
+
+        assert scoped_sizes, "the category should have some sizes"
+        assert scoped_sizes <= global_sizes
+        # Office signage uses the "sticker" size profile, so no 48x96.
+        assert "48x96" not in scoped_sizes
+
     async def test_brand_filter_is_case_insensitive(self, catalogue_client: AsyncClient) -> None:
         lower = await catalogue_client.get(
             "/api/v1/products", params={"brand": "Safety Poster Prints", "per_page": 50}
