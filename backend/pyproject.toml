@@ -58,6 +58,7 @@ addopts = "-ra --strict-markers --strict-config"
 markers = [
     "unit: pure logic, no database",
     "integration: requires a PostgreSQL database",
+    "api: HTTP layer tests against the ASGI app",
     "e2e: end-to-end flows",
 ]
 filterwarnings = [

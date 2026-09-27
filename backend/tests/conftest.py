@@ -19,15 +19,21 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import AsyncGenerator, Iterator
 from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 import app.models  # noqa: F401  (ensures metadata is fully populated)
+import jwt
 import pytest
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.db.base import Base
+from app.models.enums import UserRole
+from app.models.identity import Profile
+from httpx import ASGITransport, AsyncClient
+from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -222,3 +228,109 @@ async def session(clean_tables, test_database_url: str) -> AsyncGenerator[AsyncS
 def unique_suffix() -> str:
     """Short unique token for building collision-free slugs/SKUs in a test."""
     return uuid.uuid4().hex[:10]
+
+
+# ---------------------------------------------------------------------------
+# Auth fixtures for API tests
+# ---------------------------------------------------------------------------
+#: Matches .env.example's local value. Tests mint HS256 tokens with it, which
+#: is exactly the "legacy Supabase project" path the verifier supports.
+TEST_JWT_SECRET = "local-development-only-signing-secret-0123456789"
+#: Distinct from the user token key, mirroring production key-space separation.
+TEST_INTERNAL_SECRET = "test-internal-signing-secret-0123456789abcdef"
+
+
+@pytest.fixture
+def token_factory():
+    """Mint Supabase-shaped access tokens for test users."""
+
+    def _mint(
+        user_id: uuid.UUID,
+        *,
+        email: str = "test@example.com",
+        expires_in: int = 3600,
+        claims: dict | None = None,
+    ) -> str:
+        now = int(time.time())
+        payload: dict = {
+            "sub": str(user_id),
+            "email": email,
+            "aud": "authenticated",
+            "role": "authenticated",
+            "iat": now,
+            "exp": now + expires_in,
+        }
+        if claims:
+            payload.update(claims)
+        return jwt.encode(payload, TEST_JWT_SECRET, algorithm="HS256")
+
+    return _mint
+
+
+@pytest.fixture
+def settings_for_api():
+    """Settings matching the token factory above."""
+    get_settings.cache_clear()
+    return Settings(
+        app_env="development",
+        database_url=SecretStr(
+            "postgresql+asyncpg://storefront:storefront_dev_only@127.0.0.1:55432/storefront"
+        ),
+        supabase_jwt_secret=SecretStr(TEST_JWT_SECRET),
+        jwt_secret=SecretStr(TEST_INTERNAL_SECRET),
+        cors_origins="http://localhost:3000",
+        rate_limit_enabled=False,
+    )
+
+
+@pytest.fixture
+async def make_profile(session):
+    """Create a profile row in the test database."""
+
+    async def _make(
+        *,
+        role: str = "CUSTOMER",
+        email: str | None = None,
+        full_name: str = "Test Customer",
+        is_active: bool = True,
+    ) -> Profile:
+        profile = Profile(
+            id=uuid.uuid4(),
+            email=email or f"user-{uuid.uuid4().hex[:10]}@example.com",
+            full_name=full_name,
+            role=UserRole(role),
+            is_active=is_active,
+        )
+        session.add(profile)
+        await session.commit()
+        return profile
+
+    return _make
+
+
+@pytest.fixture
+async def api_client(session, settings_for_api):
+    """httpx client wired to the test database and test settings."""
+    from app.api import deps as deps_module
+    from app.core.security import SupabaseTokenVerifier
+    from app.db.session import get_db
+    from app.main import create_app
+
+    async def _override_get_db():
+        yield session
+
+    app = create_app()
+    app.dependency_overrides[get_db] = _override_get_db
+
+    # Point the token verifier at the test secret, and hand it a verifier that
+    # never needs the network (HS256 path only).
+    test_verifier = SupabaseTokenVerifier(settings_for_api)
+    app.dependency_overrides[deps_module.get_token_verifier] = lambda: test_verifier
+
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as client:
+        client.app_instance = app  # type: ignore[attr-defined]
+        yield client
+
+    app.dependency_overrides.clear()
+    await test_verifier.aclose()
