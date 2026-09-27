@@ -233,7 +233,7 @@ async def _reserve_one(
         raise InsufficientStockError(
             "Some items are no longer available in the requested quantity.",
             code="insufficient_stock",
-            details={"variant_id": str(line.variant_id), "available": available},
+            extra={"variant_id": str(line.variant_id), "available": available},
         )
 
     quantity_after, available_after = row

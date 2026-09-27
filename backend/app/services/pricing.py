@@ -500,20 +500,29 @@ def spread_discount(discount_total: int, line_totals: Sequence[int]) -> list[int
     return raw
 
 
-def allocate_line_tax(
-    line_goods_total: int, totals: Totals
-) -> int:
-    """Attribute part of the order tax to a single line, for the invoice.
+def allocate_tax_across_lines(
+    line_goods_totals: Sequence[int], totals: Totals
+) -> list[int]:
+    """Attribute the order's tax across every line, for the invoice.
 
-    Uses the same largest-first remainder distribution as the discount, so
-    ``sum(line_tax) == totals.tax_total`` exactly.
+    Takes *all* the lines at once, and that is not a stylistic choice. An
+    earlier version of this exposed a single-line signature and computed
+    `spread_discount(order_tax, [this_line])` - which hands the entire tax to
+    every line, so an invoice for two lines showed the full GST on each and
+    double the tax in total. Distributing a total is only well defined when the
+    denominator is the whole set, so the whole set is the signature.
+
+    Returns a list that sums to ``totals.tax_total`` exactly, so the printed
+    per-line figures reconcile with the order total.
     """
-    if totals.tax_total <= 0:
-        return 0
+    if totals.tax_total <= 0 or not line_goods_totals:
+        return [0] * len(line_goods_totals)
+
     goods = totals.subtotal - totals.discount_total
-    if goods <= 0 or line_goods_total <= 0:
-        return 0
-    return spread_discount(totals.tax_total, [line_goods_total])[0]
+    if goods <= 0:
+        return [0] * len(line_goods_totals)
+
+    return spread_discount(totals.tax_total, list(line_goods_totals))
 
 
 def sum_check(values: Iterable[int]) -> int:

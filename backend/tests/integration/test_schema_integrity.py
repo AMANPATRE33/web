@@ -317,19 +317,19 @@ async def test_order_total_consistency_is_enforced(session, make_profile) -> Non
     whole session with ``PendingRollbackError``, and the next assertion would
     fail for the wrong reason - or, worse, pass without ever reaching the CHECK.
     """
-    base = dict(
-        email="x@example.com",
-        phone="9999999999",
-        shipping_name="X",
-        shipping_line1="1 St",
-        shipping_city="Pune",
-        shipping_state="MH",
-        shipping_postal_code="411001",
-        subtotal=100000,
-        discount_total=10000,
-        shipping_total=5000,
-        tax_total=18000,
-    )
+    base = {
+        "email": "x@example.com",
+        "phone": "9999999999",
+        "shipping_name": "X",
+        "shipping_line1": "1 St",
+        "shipping_city": "Pune",
+        "shipping_state": "MH",
+        "shipping_postal_code": "411001",
+        "subtotal": 100000,
+        "discount_total": 10000,
+        "shipping_total": 5000,
+        "tax_total": 18000,
+    }
 
     async def expect_rejected(constraint: str, **overrides) -> None:
         savepoint = await session.begin_nested()
@@ -387,20 +387,20 @@ async def test_order_total_consistency_is_enforced(session, make_profile) -> Non
 async def test_order_needs_exactly_one_owner(session) -> None:
     """A cart or order reachable by both a profile and a guest token is a
     cross-account read, so the database refuses to represent that state."""
-    base = dict(
-        email="x@example.com",
-        phone="9",
-        shipping_name="X",
-        shipping_line1="1 St",
-        shipping_city="Pune",
-        shipping_state="MH",
-        shipping_postal_code="411001",
-        subtotal=0,
-        discount_total=0,
-        shipping_total=0,
-        tax_total=0,
-        total=0,
-    )
+    base = {
+        "email": "x@example.com",
+        "phone": "9",
+        "shipping_name": "X",
+        "shipping_line1": "1 St",
+        "shipping_city": "Pune",
+        "shipping_state": "MH",
+        "shipping_postal_code": "411001",
+        "subtotal": 0,
+        "discount_total": 0,
+        "shipping_total": 0,
+        "tax_total": 0,
+        "total": 0,
+    }
 
     async def attempt(**kwargs):
         savepoint = await session.begin_nested()

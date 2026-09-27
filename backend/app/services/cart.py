@@ -397,7 +397,7 @@ async def add_item(
             raise InsufficientStockError(
                 "This product is no longer available in the requested quantity.",
                 code="out_of_stock",
-                details={"available": 0},
+                extra={"available": 0},
             )
         if kept < wanted:
             logger.info(
@@ -415,7 +415,7 @@ async def add_item(
         raise InsufficientStockError(
             "This product is no longer available in the requested quantity.",
             code="insufficient_stock",
-            details={"available": available},
+            extra={"available": available},
         )
 
     item = CartItem(
@@ -461,7 +461,7 @@ async def update_item(
         raise InsufficientStockError(
             "This product is no longer available in the requested quantity.",
             code="insufficient_stock",
-            details={"available": available},
+            extra={"available": available},
         )
 
     item.quantity = quantity
