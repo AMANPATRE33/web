@@ -16,9 +16,12 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import ClassVar
 
-from sqlalchemy import DateTime, Enum as SAEnum, MetaData, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PGUUID
+from sqlalchemy import DateTime, MetaData, func
+from sqlalchemy import Enum as SAEnum
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 # Deterministic constraint naming keeps Alembic autogenerate diffs stable and
@@ -35,7 +38,7 @@ NAMING_CONVENTION = {
 class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
-    type_annotation_map = {
+    type_annotation_map: ClassVar[dict[object, object]] = {
         dict[str, object]: JSONB,
         list[str]: JSONB,
         uuid.UUID: PGUUID(as_uuid=True),

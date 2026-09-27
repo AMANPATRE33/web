@@ -15,18 +15,17 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
-from decimal import Decimal
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Computed,
     DateTime,
     ForeignKey,
     Index,
     Integer,
-    Numeric,
     SmallInteger,
     String,
     Text,
@@ -34,7 +33,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import TSVECTOR
+from sqlalchemy.dialects.postgresql import JSONB, TSVECTOR
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, enum_column
@@ -143,14 +142,12 @@ class Product(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
     #: Free-form merchandising attributes surfaced on the PDP spec table.
-    specs: Mapped[dict[str, object]] = mapped_column(
-        Text().with_variant(Text, "postgresql"), nullable=False, server_default="{}"
-    )
+    specs: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, server_default="{}")
 
     # SEO
     seo_title: Mapped[str | None] = mapped_column(String(180))
     seo_description: Mapped[str | None] = mapped_column(String(320))
-    seo_keywords: Mapped[list[str] | None] = mapped_column(Text)
+    seo_keywords: Mapped[list[str] | None] = mapped_column(JSONB)
 
     search_vector: Mapped[object | None] = mapped_column(TSVECTOR, nullable=True)
 
@@ -231,7 +228,7 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(160), nullable=False)
     #: e.g. {"Colour": "Midnight", "Size": "M"} - the UI renders these directly.
     attributes: Mapped[dict[str, object]] = mapped_column(
-        Text().with_variant(Text, "postgresql"), nullable=False, server_default="{}"
+        JSONB, nullable=False, server_default="{}"
     )
     #: Minor units. NULL means "inherit the product price".
     price_override: Mapped[int | None] = mapped_column(BigInteger)
@@ -246,9 +243,7 @@ class ProductVariant(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     position: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default="0")
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     #: Units below this threshold raise a low-stock alert.
-    low_stock_threshold: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=3
-    )
+    low_stock_threshold: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     weight_grams: Mapped[int | None] = mapped_column(Integer)
 
     product: Mapped[Product] = relationship(back_populates="variants", lazy="joined")
@@ -337,21 +332,23 @@ class Inventory(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     quantity: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
     #: Units held for in-flight payments. Released on failure or expiry.
     reserved: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    low_stock_threshold: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=3
-    )
+    low_stock_threshold: Mapped[int] = mapped_column(Integer, nullable=False, server_default="3")
     #: Reorder point used by the low-stock job and the admin dashboard.
-    reorder_point: Mapped[int] = mapped_column(Integer, nullable=False, server_default=5)
+    reorder_point: Mapped[int] = mapped_column(Integer, nullable=False, server_default="5")
+    #: Sellable units right now. A *generated* column, so no code path - ours,
+    #: a psql session, or a future service - can write a stock figure that
+    #: disagrees with itself. This is what oversell protection is checked against.
+    available: Mapped[int] = mapped_column(Computed("quantity - reserved", persisted=True))
 
     variant: Mapped[ProductVariant] = relationship(back_populates="inventory", lazy="joined")
 
     @property
     def is_low_stock(self) -> bool:
-        return (self.quantity - self.reserved) <= self.low_stock_threshold
+        return self.available <= self.low_stock_threshold
 
     @property
     def is_out_of_stock(self) -> bool:
-        return self.quantity - self.reserved <= 0
+        return self.available <= 0
 
 
 class InventoryMovement(UUIDPrimaryKeyMixin, Base):
@@ -378,9 +375,7 @@ class InventoryMovement(UUIDPrimaryKeyMixin, Base):
     reason: Mapped[InventoryReason] = mapped_column(
         enum_column(InventoryReason, "inventory_reason"), nullable=False
     )
-    order_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("orders.id", ondelete="SET NULL")
-    )
+    order_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("orders.id", ondelete="SET NULL"))
     note: Mapped[str | None] = mapped_column(String(240))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

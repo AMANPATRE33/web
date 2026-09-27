@@ -44,9 +44,7 @@ class OrderStatus(StrEnum):
 
 #: Legal forward transitions. Anything else is rejected server-side.
 ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
-    OrderStatus.PENDING: frozenset(
-        {OrderStatus.PAYMENT_PENDING, OrderStatus.CANCELLED}
-    ),
+    OrderStatus.PENDING: frozenset({OrderStatus.PAYMENT_PENDING, OrderStatus.CANCELLED}),
     OrderStatus.PAYMENT_PENDING: frozenset(
         {OrderStatus.PAID, OrderStatus.PENDING, OrderStatus.CANCELLED}
     ),
@@ -56,9 +54,7 @@ ORDER_TRANSITIONS: dict[OrderStatus, frozenset[OrderStatus]] = {
     OrderStatus.PROCESSING: frozenset(
         {OrderStatus.SHIPPED, OrderStatus.CANCELLED, OrderStatus.REFUNDED}
     ),
-    OrderStatus.SHIPPED: frozenset(
-        {OrderStatus.DELIVERED, OrderStatus.REFUNDED}
-    ),
+    OrderStatus.SHIPPED: frozenset({OrderStatus.DELIVERED, OrderStatus.REFUNDED}),
     OrderStatus.DELIVERED: frozenset({OrderStatus.REFUNDED}),
     OrderStatus.CANCELLED: frozenset(),
     OrderStatus.REFUNDED: frozenset(),
@@ -140,7 +136,7 @@ class SubscriberStatus(StrEnum):
 class EmailKind(StrEnum):
     WELCOME = "WELCOME"
     EMAIL_VERIFICATION = "EMAIL_VERIFICATION"
-    PASSWORD_RESET = "PASSWORD_RESET"
+    PASSWORD_RESET = "PASSWORD_RESET"  # noqa: S105 - an enum label, not a secret
     ORDER_CONFIRMATION = "ORDER_CONFIRMATION"
     PAYMENT_CONFIRMATION = "PAYMENT_CONFIRMATION"
     PAYMENT_FAILED = "PAYMENT_FAILED"

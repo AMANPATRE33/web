@@ -54,9 +54,7 @@ def _apply_connect_hooks(engine: AsyncEngine, settings: Settings) -> None:
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         try:
             # Cap runaway queries at the database, not just in the app.
-            cursor.execute(
-                f"SET statement_timeout = {int(settings.db_statement_timeout_ms)}"
-            )
+            cursor.execute(f"SET statement_timeout = {int(settings.db_statement_timeout_ms)}")
             # Deterministic server-side UTC timestamps.
             cursor.execute("SET TIME ZONE 'UTC'")
         finally:
@@ -104,7 +102,7 @@ def get_engine(settings: Settings | None = None, *, read_only: bool = False) -> 
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     if _sessionmaker is None:
         get_engine()
-    assert _sessionmaker is not None  # noqa: S101 - invariant, not user input
+    assert _sessionmaker is not None
     return _sessionmaker
 
 
@@ -147,7 +145,7 @@ async def ping_database(settings: Settings | None = None) -> bool:
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
         return True
-    except Exception as exc:  # noqa: BLE001 - health probe must never raise
+    except Exception as exc:
         logger.warning("database_ping_failed", error=str(exc))
         return False
 

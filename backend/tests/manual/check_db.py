@@ -16,7 +16,7 @@ async def main() -> None:
         async with engine.connect() as conn:
             result = await conn.exec_driver_sql("select 1 as ok")
             print("raw connect OK:", result.fetchall())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         print("FAILED:", type(exc).__name__)
         print(exc)
 

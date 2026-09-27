@@ -1,0 +1,76 @@
+-- =============================================================================
+-- database/sql/  -  Supabase-only SQL
+-- =============================================================================
+-- ## What lives here, and what does not
+--
+-- The schema is owned exclusively by Alembic (`backend/alembic/`). Nothing in
+-- this directory creates or alters a table, column, index or enum. Duplicating
+-- that DDL here would guarantee drift the first time a migration is added.
+--
+-- What *is* here is the set of concerns that are declarative Supabase
+-- platform configuration rather than schema history:
+--
+-- | File                     | Owns                                                        |
+-- |--------------------------|-------------------------------------------------------------|
+-- | 001_extensions.sql       | Extensions schema + default grants                         |
+-- | 002_rls_policies.sql     | Row Level Security, per table                             |
+-- | 003_storage.sql          | Storage buckets + object policies                         |
+-- | 004_auth_integration.sql | Profile trigger on auth.users + the auth FK               |
+--
+-- These are applied **once per Supabase project**, after
+-- `alembic upgrade head`. They are intentionally outside the migration chain
+-- because they are idempotent, platform-specific, and safe to re-apply at any
+-- time - which is exactly what you want after adding a new table.
+--
+-- ## Application order
+--
+--   1. `cd backend && python -m alembic upgrade head`     (creates the tables)
+--   2. Supabase SQL editor, run in order:
+--        001_extensions.sql
+--        002_rls_policies.sql
+--        003_storage.sql
+--        004_auth_integration.sql
+--   3. `python -m scripts.verify_schema`                  (drift check)
+--   4. `python -m scripts.seed`                            (demo catalogue)
+--
+-- Running 002 before 001 succeeds but does nothing useful, so keep the order.
+-- Running 004 on a non-Supabase database is a no-op by design: every statement
+-- is guarded by a check for the `auth` schema.
+--
+-- ## Why RLS matters even though the API uses the service role
+--
+-- The API connects with `SUPABASE_SERVICE_ROLE_KEY`, which bypasses RLS. These
+-- policies are therefore not protecting the API - they are protecting every
+-- *other* consumer of the database: the Supabase JS client in the browser, the
+-- dashboard, and anything else that might one day be handed the `anon`
+-- publishable key.
+--
+-- The rule is the same throughout:
+--
+--   anon          read the public catalogue, nothing else
+--   authenticated read/write only their own rows
+--   no policy     deny (the default once RLS is enabled)
+--
+-- There is no blanket "allow all" policy anywhere in this directory, and
+-- customers have no INSERT/UPDATE/DELETE policy on `orders` at all - order
+-- creation is the API's job alone, enforced again at the row level.
+--
+-- ## After adding a table
+--
+-- New tables ship with RLS **disabled**, because a table with RLS enabled and
+-- no policy silently returns zero rows to every non-service-role caller - a
+-- failure that looks like "the API is broken" when it is actually correct RLS.
+-- Re-run `002_rls_policies.sql` after every migration that adds a table, and
+-- decide per table whether it is public, owner-scoped, or staff-only.
+--
+-- ## Verifying
+--
+-- ```sql
+-- -- Every table that still has RLS disabled
+-- SELECT tablename FROM pg_tables
+--  WHERE schemaname = 'public' AND rowsecurity = false
+--    AND tablename <> 'alembic_version';
+-- ```
+--
+-- An empty result is the goal. Anything listed needs a decision recorded in
+-- `002_rls_policies.sql`.

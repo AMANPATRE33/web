@@ -99,6 +99,9 @@ BEGIN
 END
 $$;
 
+-- The test suite provisions its own database (`storefront_test`).
+ALTER ROLE storefront CREATEDB;
+
 SELECT 'CREATE DATABASE storefront OWNER storefront'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'storefront')\gexec
 

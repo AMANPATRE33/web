@@ -44,9 +44,7 @@ def configure_logging(settings: Settings) -> None:
 
     if json_output:
         shared_processors.append(structlog.processors.format_exc_info)
-        shared_processors.append(
-            structlog.processors.EventRenamer("message", replace_by="_event")
-        )
+        shared_processors.append(structlog.processors.EventRenamer("message", replace_by="_event"))
 
     renderer: Any
     if json_output:

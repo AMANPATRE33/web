@@ -13,7 +13,7 @@ async def main() -> None:
         client = Redis.from_url(url, socket_connect_timeout=2)
         try:
             print(url, "->", await client.ping())
-        except Exception:  # noqa: BLE001
+        except Exception:
             print(url, "-> FAILED")
             traceback.print_exc()
         finally:

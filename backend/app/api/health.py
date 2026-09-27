@@ -101,7 +101,7 @@ async def _probe_redis(*, name: str, url: str, attempts: int) -> ComponentHealth
             await client.ping()
         finally:
             await client.aclose()
-    except Exception as exc:  # noqa: BLE001 - probes must never raise
+    except Exception as exc:
         return ComponentHealth(
             name=name,
             status="degraded",

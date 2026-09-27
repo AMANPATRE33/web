@@ -29,9 +29,7 @@ _NOISY_PATHS = {"/health", "/api/health", "/metrics"}
 class RequestContextMiddleware(BaseHTTPMiddleware):
     """Assign a request id, bind it to the log context, time the request."""
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         incoming = request.headers.get(REQUEST_ID_HEADER)
         request_id = incoming or f"req_{uuid.uuid4().hex[:20]}"
         request.state.request_id = request_id
@@ -79,9 +77,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.enabled = enabled
 
-    async def dispatch(
-        self, request: Request, call_next: RequestResponseEndpoint
-    ) -> Response:
+    async def dispatch(self, request: Request, call_next: RequestResponseEndpoint) -> Response:
         response = await call_next(request)
         if not self.enabled:
             return response

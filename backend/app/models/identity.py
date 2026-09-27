@@ -65,9 +65,7 @@ class Profile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     phone_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    marketing_opt_in: Mapped[bool] = mapped_column(
-        Boolean, nullable=False, server_default="false"
-    )
+    marketing_opt_in: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 
     # Soft-lock. A deactivated account keeps its order history intact.
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -79,9 +77,7 @@ class Profile(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     orders: Mapped[list[Order]] = relationship(back_populates="profile", lazy="noload")
     cart: Mapped[Cart | None] = relationship(back_populates="profile", uselist=False)
-    wishlist: Mapped[Wishlist | None] = relationship(
-        back_populates="profile", uselist=False
-    )
+    wishlist: Mapped[Wishlist | None] = relationship(back_populates="profile", uselist=False)
 
     @property
     def is_admin(self) -> bool:
@@ -124,9 +120,7 @@ class Address(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     city: Mapped[str] = mapped_column(String(96), nullable=False)
     state: Mapped[str] = mapped_column(String(96), nullable=False)
     postal_code: Mapped[str] = mapped_column(String(16), nullable=False)
-    country_code: Mapped[str] = mapped_column(
-        String(2), nullable=False, server_default="IN"
-    )
+    country_code: Mapped[str] = mapped_column(String(2), nullable=False, server_default="IN")
 
     is_default: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
 

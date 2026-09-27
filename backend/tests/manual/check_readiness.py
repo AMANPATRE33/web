@@ -5,9 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 
-from httpx import ASGITransport, AsyncClient
-
 from app.main import create_app
+from httpx import ASGITransport, AsyncClient
 
 
 async def main() -> None:

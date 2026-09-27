@@ -61,6 +61,12 @@ markers = [
     "e2e: end-to-end flows",
 ]
 filterwarnings = [
+    # An un-awaited coroutine is a *silent* no-op: in SQLAlchemy >= 2.1
+    # `AsyncSession.delete()` and `.merge()` are coroutines, so calling them
+    # without `await` produces no error and no effect - the flush just does
+    # nothing. That failure mode hides until an assertion mysteriously reads
+    # stale data, so it is promoted to an error here.
+    "error:coroutine .* was never awaited:RuntimeWarning",
     "error::DeprecationWarning:app.*",
     "ignore::DeprecationWarning",
 ]
@@ -81,7 +87,10 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S105", "S106", "S311"]
+# Test code legitimately contains credentials for the throwaway local database
+# and calls subprocess with fixed, non-interpolated argument vectors.
+"tests/*" = ["S105", "S106", "S311", "S603", "S607"]
+"alembic/versions/*" = ["E501"]
 
 [tool.mypy]
 python_version = "3.12"
