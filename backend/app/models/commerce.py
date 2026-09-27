@@ -31,7 +31,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base, TimestampMixin, UUIDPrimaryKeyMixin, enum_column
 from app.models.catalog import ProductVariant
-from app.models.enums import CartStatus, CouponType, ShippingMethodCode
+from app.models.enums import (
+    CartStatus,
+    CouponType,
+    InventoryReason,
+    ReservationStatus,
+    ShippingMethodCode,
+)
 
 if TYPE_CHECKING:
     from app.models.identity import Profile
@@ -43,18 +49,41 @@ class Cart(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __table_args__ = (
         # A user has at most one live cart. Historic carts become CONVERTED or
         # EXPIRED and no longer conflict with this constraint.
+        #
+        # `profile_id` is nullable so a shopper can build a cart before signing
+        # up, which is most of Indian retail checkout traffic. PostgreSQL treats
+        # NULLs as distinct in a unique index, so guest rows cannot collide with
+        # each other or with a profile row here; they are covered by
+        # `uq_carts_one_active_per_guest_token` instead.
         Index(
             "uq_carts_one_active_per_user",
             "profile_id",
             unique=True,
             postgresql_where=text("status IN ('ACTIVE', 'ABANDONED')"),
         ),
+        Index(
+            "uq_carts_one_active_per_guest_token",
+            "guest_token_hash",
+            unique=True,
+            postgresql_where=text(
+                "guest_token_hash IS NOT NULL AND status IN ('ACTIVE', 'ABANDONED')"
+            ),
+        ),
         Index("ix_carts_status_updated_at", "status", "updated_at"),
+        # Exactly one owner. Without this a cart could be reachable through both
+        # a profile and a leaked guest token, and a merge could be replayed.
+        CheckConstraint(
+            "(profile_id IS NOT NULL) <> (guest_token_hash IS NOT NULL)",
+            name="carts_exactly_one_owner",
+        ),
     )
 
-    profile_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=False
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("profiles.id", ondelete="CASCADE"), nullable=True
     )
+    #: sha256 of a 256-bit cookie token. The token itself is never stored, so a
+    #: database dump cannot hand an attacker a set of live guest carts.
+    guest_token_hash: Mapped[str | None] = mapped_column(String(64))
     status: Mapped[CartStatus] = mapped_column(
         enum_column(CartStatus, "cart_status", default=CartStatus.ACTIVE),
         nullable=False,
@@ -74,6 +103,9 @@ class Cart(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         lazy="selectin",
         order_by="CartItem.created_at",
+    )
+    reservations: Mapped[list[InventoryReservation]] = relationship(
+        back_populates="cart", cascade="all, delete-orphan", lazy="noload"
     )
 
 
@@ -100,6 +132,97 @@ class CartItem(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     cart: Mapped[Cart] = relationship(back_populates="items", lazy="joined")
     variant: Mapped[ProductVariant] = relationship(back_populates="cart_items", lazy="joined")
+
+
+class InventoryReservation(UUIDPrimaryKeyMixin, Base):
+    """One held block of stock, and its whole life story.
+
+    `docs/ARCHITECTURE.md` §5 called for this ledger so that a leaked
+    reservation is always traceable. Without it, stock released by a failed
+    payment and stock lost to a crashed worker are indistinguishable, and the
+    only way to find out is to notice the catalogue looks wrong.
+
+    The partial unique index below is the load-bearing part, and it is a
+    correctness mechanism rather than a de-duplication convenience:
+
+        uq_inventory_reservations_held_per_order_variant
+        UNIQUE (order_id, variant_id) WHERE status = 'HELD'
+
+    A second attempt to hold the same line for the same order is a *database
+    error*, not a second decrement. That is what makes webhook replay and payment
+    retry safe by construction instead of by remembering to check something first.
+    Released and expired rows are kept, so the history stays readable; a new
+    attempt writes a new row.
+    """
+
+    __tablename__ = "inventory_reservations"
+    __table_args__ = (
+        Index(
+            "uq_inventory_reservations_held_per_order_variant",
+            "order_id",
+            "variant_id",
+            unique=True,
+            postgresql_where=text("status = 'HELD'"),
+        ),
+        # The expiry sweeper's driving query, so releasing abandoned payment
+        # windows does not scan the whole ledger.
+        Index(
+            "ix_inventory_reservations_expiry_sweep",
+            "expires_at",
+            postgresql_where=text("status = 'HELD' AND expires_at IS NOT NULL"),
+        ),
+        Index("ix_inventory_reservations_variant_status", "variant_id", "status"),
+        Index("ix_inventory_reservations_order_id", "order_id"),
+        Index("ix_inventory_reservations_cart_id", "cart_id"),
+        CheckConstraint("quantity > 0", name="reservation_quantity_positive"),
+        # A hold with no holder cannot be attributed to anything and must not be
+        # creatable.
+        CheckConstraint(
+            "(order_id IS NOT NULL) OR (cart_id IS NOT NULL)",
+            name="reservation_has_holder",
+        ),
+    )
+
+    variant_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("product_variants.id", ondelete="CASCADE"), nullable=False
+    )
+    order_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("orders.id", ondelete="CASCADE")
+    )
+    cart_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("carts.id", ondelete="CASCADE")
+    )
+    quantity: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+
+    status: Mapped[ReservationStatus] = mapped_column(
+        enum_column(ReservationStatus, "reservation_status", default=ReservationStatus.HELD),
+        nullable=False,
+        server_default=ReservationStatus.HELD.value,
+    )
+    #: Why the hold was taken. Mirrors `InventoryReason` so the reservation and
+    #: the movement it produced can be read side by side.
+    reason: Mapped[InventoryReason] = mapped_column(
+        enum_column(InventoryReason, "inventory_reason", default=InventoryReason.RESERVATION),
+        nullable=False,
+        server_default=InventoryReason.RESERVATION.value,
+    )
+
+    #: When an unpaid hold may be swept. Set from `payment_intent_ttl_seconds`.
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    committed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    note: Mapped[str | None] = mapped_column(String(240))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now()"), nullable=False
+    )
+
+    variant: Mapped[ProductVariant] = relationship(lazy="noload")
+    order: Mapped[Order | None] = relationship(back_populates="reservations", lazy="noload")
+    cart: Mapped[Cart | None] = relationship(back_populates="reservations", lazy="noload")
+
+    @property
+    def is_active(self) -> bool:
+        return self.status == ReservationStatus.HELD
 
 
 class Wishlist(UUIDPrimaryKeyMixin, TimestampMixin, Base):

@@ -50,7 +50,7 @@ from app.models.enums import (
 
 if TYPE_CHECKING:
     from app.models.catalog import Product, ProductVariant
-    from app.models.commerce import CouponUsage
+    from app.models.commerce import CouponUsage, InventoryReservation
     from app.models.identity import Profile
 
 
@@ -74,8 +74,16 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         CheckConstraint("shipping_total >= 0", name="shipping_non_negative"),
         CheckConstraint("tax_total >= 0", name="tax_non_negative"),
         CheckConstraint("total >= 0", name="total_non_negative"),
+        # `total_consistent` branches on `tax_inclusive` rather than assuming
+        # tax is always *added*. With GST-inclusive pricing - the Indian retail
+        # default and this project's configured `tax_mode` - the tax is a
+        # component *of* the total, so adding it would double-charge the
+        # customer and overstate the invoice. `tax_total` is the tax component in
+        # both modes, which is what an invoice needs either way.
         CheckConstraint(
-            "total = subtotal - discount_total + shipping_total + tax_total",
+            "(tax_inclusive AND total = subtotal - discount_total + shipping_total) "
+            "OR (NOT tax_inclusive "
+            "AND total = subtotal - discount_total + shipping_total + tax_total)",
             name="total_consistent",
         ),
         # A GSTIN is structurally 15 characters. Validating the shape at the
@@ -92,6 +100,23 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         CheckConstraint("taxable_amount >= 0", name="taxable_amount_non_negative"),
         CheckConstraint("tax_rate_bps >= 0 AND tax_rate_bps <= 10000", name="tax_rate_in_range"),
+        # A GST invoice must show CGST/SGST for an intra-state supply and IGST
+        # for an inter-state one. We store the customer's state as free text, not
+        # a code, so place of supply cannot be derived at render time. Recording
+        # the split that was *applied* means a historical invoice is reproducible
+        # after the configuration changes - the same reasoning behind
+        # `tax_rate_bps`.
+        CheckConstraint(
+            "tax_split_mode IN ('INTRA_STATE', 'INTER_STATE')",
+            name="tax_split_mode_known",
+        ),
+        # Exactly one owner. Guest checkout is supported, so this cannot simply
+        # be "profile_id is not null"; a cart or order reachable by both a
+        # profile and a leaked guest token is a cross-account read.
+        CheckConstraint(
+            "(profile_id IS NOT NULL) <> (guest_token_hash IS NOT NULL)",
+            name="orders_exactly_one_owner",
+        ),
         Index("ix_orders_profile_created", "profile_id", "created_at"),
         Index("ix_orders_status_created", "status", "created_at"),
         # Partial index for the fulfilment queue: only live orders, newest first.
@@ -111,9 +136,16 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     #: Human friendly, shown in emails and support. Never sequential.
     order_number: Mapped[str] = mapped_column(String(24), nullable=False)
-    profile_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("profiles.id", ondelete="RESTRICT"), nullable=False
+    #: NULL for a guest order. `RESTRICT` still protects history: a profile that
+    #: placed orders cannot be deleted out from under them, while a profile that
+    #: never ordered can be removed cleanly.
+    profile_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("profiles.id", ondelete="RESTRICT"), nullable=True
     )
+    #: sha256 of a cookie token, the guest equivalent of `profile_id`. Stored
+    #: hashed so the confirmation and invoice links survive a database dump
+    #: without being usable from one.
+    guest_token_hash: Mapped[str | None] = mapped_column(String(64))
 
     status: Mapped[OrderStatus] = mapped_column(
         ORDER_STATUS_PG,
@@ -210,6 +242,12 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     tax_rate_bps: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1800")
     #: Recorded per order because the store default can change over time.
     tax_inclusive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    #: CGST/SGMT halves for an intra-state supply, IGST for inter-state. Stored
+    #: for the same reason as `tax_rate_bps`: the invoice that was issued has to
+    #: be reproducible.
+    tax_split_mode: Mapped[str] = mapped_column(
+        String(16), nullable=False, server_default="INTRA_STATE"
+    )
     #: HSN code, required on a GST invoice for goods.
     hsn_code: Mapped[str | None] = mapped_column(String(12))
     #: Sequential per financial year, e.g. SPP/26-27/00042. Issued once, on
@@ -238,6 +276,9 @@ class Order(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     coupon_usage: Mapped[CouponUsage | None] = relationship(
         back_populates="order", uselist=False, lazy="joined"
+    )
+    reservations: Mapped[list[InventoryReservation]] = relationship(
+        back_populates="order", cascade="all, delete-orphan", lazy="selectin"
     )
 
     @property

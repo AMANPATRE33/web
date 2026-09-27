@@ -304,30 +304,161 @@ async def test_only_one_default_address_per_profile(session) -> None:
 # ---------------------------------------------------------------------------
 # order money invariants
 # ---------------------------------------------------------------------------
-async def test_order_total_consistency_is_enforced(session) -> None:
-    """The database itself must reject an order whose totals do not add up."""
+async def test_order_total_consistency_is_enforced(session, make_profile) -> None:
+    """The database itself must reject an order whose totals do not add up.
+
+    Both tax modes are covered, because the constraint branches on
+    ``tax_inclusive``. Testing only one is how the previous version of this test
+    came to pass for the wrong reason: the old constraint assumed tax was always
+    *added*, so once inclusive pricing became possible the same bad total was
+    still rejected - just by a different clause of the formula.
+
+    Each assertion runs inside a SAVEPOINT. A failed flush otherwise poisons the
+    whole session with ``PendingRollbackError``, and the next assertion would
+    fail for the wrong reason - or, worse, pass without ever reaching the CHECK.
+    """
+    base = dict(
+        email="x@example.com",
+        phone="9999999999",
+        shipping_name="X",
+        shipping_line1="1 St",
+        shipping_city="Pune",
+        shipping_state="MH",
+        shipping_postal_code="411001",
+        subtotal=100000,
+        discount_total=10000,
+        shipping_total=5000,
+        tax_total=18000,
+    )
+
+    async def expect_rejected(constraint: str, **overrides) -> None:
+        savepoint = await session.begin_nested()
+        session.add(
+            Order(
+                **base,
+                order_number=f"TEST-{uuid.uuid4().hex[:8]}",
+                profile_id=uuid.uuid4(),
+                **overrides,
+            )
+        )
+        with pytest.raises(IntegrityError, match=constraint):
+            await session.flush()
+        await savepoint.rollback()
+
+    async def expect_accepted(**overrides) -> Order:
+        # A real profile row: the accepted case must satisfy the foreign key too,
+        # or it would fail for a different reason than the one under test.
+        profile = await make_profile()
+        savepoint = await session.begin_nested()
+        order = Order(
+            **base,
+            order_number=f"TEST-{uuid.uuid4().hex[:8]}",
+            profile_id=profile.id,
+            **overrides,
+        )
+        session.add(order)
+        await session.flush()
+        await savepoint.commit()
+        return order
+
+    # GST-inclusive: tax is inside `subtotal`, so it must NOT be added again.
+    # Correct total is 100000 - 10000 + 5000 = 95000; 113000 double-counts tax.
+    await expect_rejected("total_consistent", tax_inclusive=True, total=113000)
+
+    # GST-exclusive: tax is added on top.
+    # Correct total is 100000 - 10000 + 5000 + 18000 = 113000; 95000 drops tax.
+    await expect_rejected("total_consistent", tax_inclusive=False, total=95000)
+
+    # And the correct figure in each mode must be accepted, so this test cannot
+    # pass simply by rejecting everything.
+    inclusive = await expect_accepted(tax_inclusive=True, total=95000)
+    assert inclusive.total == inclusive.subtotal - inclusive.discount_total + (
+        inclusive.shipping_total
+    )
+    exclusive = await expect_accepted(tax_inclusive=False, total=113000)
+    assert exclusive.total == (
+        exclusive.subtotal
+        - exclusive.discount_total
+        + exclusive.shipping_total
+        + exclusive.tax_total
+    )
+
+
+async def test_order_needs_exactly_one_owner(session) -> None:
+    """A cart or order reachable by both a profile and a guest token is a
+    cross-account read, so the database refuses to represent that state."""
+    base = dict(
+        email="x@example.com",
+        phone="9",
+        shipping_name="X",
+        shipping_line1="1 St",
+        shipping_city="Pune",
+        shipping_state="MH",
+        shipping_postal_code="411001",
+        subtotal=0,
+        discount_total=0,
+        shipping_total=0,
+        tax_total=0,
+        total=0,
+    )
+
+    async def attempt(**kwargs):
+        savepoint = await session.begin_nested()
+        session.add(
+            Order(**base, order_number=f"TEST-{uuid.uuid4().hex[:8]}", **kwargs)
+        )
+        try:
+            await session.flush()
+        finally:
+            await savepoint.rollback()
+
+    # Neither owner.
+    with pytest.raises(IntegrityError, match="orders_exactly_one_owner"):
+        await attempt()
+
+    # Both owners.
+    with pytest.raises(IntegrityError, match="orders_exactly_one_owner"):
+        await attempt(profile_id=uuid.uuid4(), guest_token_hash="a" * 64)
+
+    # Guest only is legitimate: guest checkout has to work.
+    savepoint = await session.begin_nested()
+    session.add(
+        Order(
+            **base,
+            order_number=f"TEST-{uuid.uuid4().hex[:8]}",
+            guest_token_hash="b" * 64,
+        )
+    )
+    await session.flush()
+    await savepoint.commit()
+
+
+async def test_tax_split_mode_must_be_known(session) -> None:
+    """An invoice's CGST/IGST split is a legal statement, so the value is
+    constrained rather than accepted as free text."""
+    savepoint = await session.begin_nested()
     session.add(
         Order(
             order_number=f"TEST-{uuid.uuid4().hex[:8]}",
             profile_id=uuid.uuid4(),
             email="x@example.com",
-            phone="9999999999",
+            phone="9",
             shipping_name="X",
             shipping_line1="1 St",
             shipping_city="Pune",
             shipping_state="MH",
             shipping_postal_code="411001",
-            subtotal=100000,
-            discount_total=10000,
-            shipping_total=5000,
-            tax_total=18000,
-            # 100000 - 10000 + 5000 + 18000 = 113000, so 99999 must be rejected.
-            total=99999,
+            subtotal=0,
+            discount_total=0,
+            shipping_total=0,
+            tax_total=0,
+            total=0,
+            tax_split_mode="MAYBE",
         )
     )
-    with pytest.raises(IntegrityError, match="total_consistent"):
-        await session.commit()
-
+    with pytest.raises(IntegrityError, match="tax_split_mode_known"):
+        await session.flush()
+    await savepoint.rollback()
 
 async def test_order_profile_fk_protects_history(session) -> None:
     session.add(

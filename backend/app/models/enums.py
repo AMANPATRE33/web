@@ -119,6 +119,26 @@ class InventoryReason(StrEnum):
     RETURN = "RETURN"
     ADJUSTMENT = "ADJUSTMENT"
     DAMAGE = "DAMAGE"
+    #: A payment window closed before the customer completed it.
+    EXPIRY = "EXPIRY"
+
+
+class ReservationStatus(StrEnum):
+    """Lifecycle of one held unit.
+
+    The terminal states are terminal on purpose: a released reservation is a
+    historical fact, not something a later webhook can revive. Reconciliation
+    and "did we leak anything" queries both rely on that.
+    """
+
+    #: Stock is held and unavailable to other shoppers.
+    HELD = "HELD"
+    #: Payment captured. The hold became a sale.
+    COMMITTED = "COMMITTED"
+    #: Payment failed or was cancelled. The hold is gone.
+    RELEASED = "RELEASED"
+    #: The payment window closed. The hold is gone.
+    EXPIRED = "EXPIRED"
 
 
 class ShippingMethodCode(StrEnum):

@@ -17,6 +17,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Environment = Literal["development", "staging", "production"]
 TaxMode = Literal["inclusive", "exclusive"]
+#: How a GST invoice breaks the tax down. See `tax_split_mode` below.
+TaxSplitMode = Literal["INTRA_STATE", "INTER_STATE"]
 EmailProvider = Literal["console", "resend", "ses", "smtp"]
 
 # Repository root: backend/app/core/config.py -> app/core -> app -> backend -> root
@@ -130,9 +132,21 @@ class Settings(BaseSettings):
     # ---------------------------------------------------- catalogue policy
     currency: str = "INR"
     currency_symbol: str = "Rs."
+    # A **fraction**, not a percentage: 0.18 means 18%. It is converted to
+    # integer basis points exactly once, in `services.pricing.rate_to_bps`, via
+    # `Decimal(str(...))` so the float literal a human typed is never the thing
+    # that gets multiplied by a cart subtotal.
     tax_mode: TaxMode = "inclusive"
     tax_rate: float = 0.18
     tax_inclusive_label: str = "incl. all taxes"
+    # Which GST breakdown an invoice carries. A GST invoice must show CGST/SGST
+    # for an intra-state supply and IGST for an inter-state one, and we store the
+    # customer's state as free text rather than a state code, so place of supply
+    # cannot be derived reliably. Making it explicit configuration is the
+    # honest option; guessing would be a compliance risk on a tax document.
+    # The applied value is written to `orders.tax_split_mode` so a historical
+    # invoice can be reproduced after this setting changes.
+    tax_split_mode: TaxSplitMode = "INTRA_STATE"
     shipping_flat_rate: float = 99.00
     shipping_free_above: float = 4999.00
     cart_abandoned_after_minutes: int = 360
