@@ -1,0 +1,58 @@
+# Keep the build context small and, more importantly, keep secrets out of it.
+#
+# This file is not an optimisation. `.env` holds a real DATABASE_URL, JWT_SECRET
+# and Supabase service-role key. Every COPY in the Dockerfile is explicit today,
+# so none of them would copy .env into a layer - but a build context is uploaded
+# to the daemon in full, and a future `COPY . .` would silently bake the secrets
+# into an image that gets pushed to a registry. Denying them here means that
+# mistake is impossible rather than merely unlikely.
+
+# --- secrets: never let these enter the build context ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+
+# --- local infrastructure and data ---
+# The isolated Postgres cluster and the portable Redis live here. ~60MB, and it
+# is a live database - it has no business in an image.
+pgdata/
+redis/
+log/
+start-pg.cmd
+start-redis.cmd
+bootstrap-db.sql
+
+# --- python ---
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# --- tests: not needed to serve traffic ---
+tests/
+# The suite pins a separate database and asserts on internals; shipping it just
+# makes the image larger and invites running it against production by accident.
+
+# --- editors / os ---
+.vscode/
+.idea/
+.git/
+.gitattributes
+*.swp
+.DS_Store
+Thumbs.db
+
+# --- docs ---
+*.md
+!../README.md

@@ -32,6 +32,11 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# The template is documentation and must be committed. Without this negation
+# `.env*` above also matched `.env.example`, so the file was silently ignored and
+# never made it into the repository - which is exactly the file a new developer
+# needs in order to know which variables the build requires.
+!.env.example
 
 # vercel
 .vercel

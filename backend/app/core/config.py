@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     razorpay_webhook_secret: SecretStr = SecretStr("")
     razorpay_mode: Literal["test", "live"] = "test"
     razorpay_capture_method: str = "automatic"
+    #: Whether this deployment takes payments.
+    #:
+    #: False (the default) because the checkout -> order -> payment pipeline is
+    #: not built yet. While False, the three Razorpay variables are not required
+    #: to boot and no payment route exists to misconfigure. Set it to True in the
+    #: same deploy that adds payment handling, and the credentials become
+    #: mandatory - the check is gated on the feature, not deleted.
+    payments_enabled: bool = False
     payment_intent_ttl_seconds: int = 900
     refund_requires_confirmation_above: float = 5000.00
 
@@ -259,10 +267,26 @@ class Settings(BaseSettings):
             problems.append("CORS_ORIGINS still points at localhost in production")
         if not self.supabase_service_role_key.get_secret_value():
             problems.append("SUPABASE_SERVICE_ROLE_KEY is required in production")
-        if not self.razorpay_is_configured:
-            problems.append("RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are required in production")
-        if not self.razorpay_webhook_secret.get_secret_value():
-            problems.append("RAZORPAY_WEBHOOK_SECRET is required in production")
+        # Razorpay is only required when payments are switched on. The payment
+        # pipeline is not built yet, so demanding three gateway credentials to
+        # boot a catalogue-only deployment blocks the one deploy that is actually
+        # useful, and trains people to paste placeholder secrets to get past it -
+        # which is a worse outcome than an unconfigured feature.
+        #
+        # This is opt-in, not opt-out: `payments_enabled` defaults to False, and
+        # setting it True restores the full requirement. Nothing is weakened for
+        # a deployment that takes money, because such a deployment has to say so
+        # explicitly before the check is skipped.
+        if self.payments_enabled:
+            if not self.razorpay_is_configured:
+                problems.append(
+                    "PAYMENTS_ENABLED is set, so RAZORPAY_KEY_ID and "
+                    "RAZORPAY_KEY_SECRET are required"
+                )
+            if not self.razorpay_webhook_secret.get_secret_value():
+                problems.append(
+                    "PAYMENTS_ENABLED is set, so RAZORPAY_WEBHOOK_SECRET is required"
+                )
         if "localhost" in self.frontend_url or "localhost" in self.backend_url:
             problems.append("FRONTEND_URL / BACKEND_URL still point at localhost")
         if not self.tax_mode:

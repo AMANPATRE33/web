@@ -26,7 +26,7 @@ const RAW_SITE_URL = process.env.NEXT_PUBLIC_SITE_URL;
  *
  * In production a missing value is a hard error. Shipping a storefront pointed
  * at localhost looks broken in a way that is very hard to diagnose from a bug
- * report, so it fails loudly at boot instead.
+ * report, so it fails loudly instead of failing quietly.
  */
 function resolve(raw: string | undefined, name: string, developmentFallback: string): string {
   const value = typeof raw === "string" && raw.length > 0 ? raw : undefined;
@@ -34,18 +34,50 @@ function resolve(raw: string | undefined, name: string, developmentFallback: str
   if (process.env.NODE_ENV === "production") {
     throw new Error(
       `Missing required environment variable ${name}. ` +
-        `Copy .env.example to .env.local and fill it in.`,
+        `Locally: copy .env.example to .env.local and fill it in. ` +
+        `On Vercel: Settings -> Environment Variables, add ${name} for ` +
+        `Production and Preview, then redeploy. NEXT_PUBLIC_* values are inlined ` +
+        `at build time, so the variable must exist before the build starts.`,
     );
   }
   return developmentFallback;
 }
 
-const apiUrl = resolve(RAW_API_URL, "NEXT_PUBLIC_API_URL", "http://localhost:8000");
-const siteUrl = resolve(RAW_SITE_URL, "NEXT_PUBLIC_SITE_URL", "http://localhost:3000");
-
+/**
+ * Runtime configuration.
+ *
+ * ## Why `apiUrl` and `siteUrl` are getters
+ *
+ * They used to be `const`s evaluated at module scope, which meant *importing*
+ * this module was enough to throw. That is a much wider blast radius than the
+ * error deserves, and it produced a genuinely misleading Vercel failure:
+ *
+ *     Error: Failed to collect configuration for /_not-found
+ *       src/lib/env.ts -> AnnouncementBar.tsx -> app/layout.tsx -> /_not-found
+ *
+ * `AnnouncementBar` imports `{ business }` from this module and never touches
+ * `env`, and the 404 page needs no API URL at all. It failed only because the
+ * root layout imports the bar, and the bar transitively imports this file.
+ *
+ * So the check moved to first *use*. Now a page that genuinely needs the API
+ * URL still fails - loudly, naming the variable and how to set it - but only when
+ * it actually asks for it, and a 404 or a policy page builds on its own.
+ *
+ * ## What this does not do
+ *
+ * It does not make the API URL optional. `NEXT_PUBLIC_API_URL` is genuinely
+ * required: `/` is prerendered with a 30s revalidate and `generateStaticParams`
+ * needs the product, blog and policy slugs, so all of them need the API at build
+ * time. With it unset those routes still fail - correctly, and now with an error
+ * that points at the route that needed it.
+ */
 export const env = {
-  apiUrl,
-  siteUrl,
+  get apiUrl(): string {
+    return resolve(RAW_API_URL, "NEXT_PUBLIC_API_URL", "http://localhost:8000");
+  },
+  get siteUrl(): string {
+    return resolve(RAW_SITE_URL, "NEXT_PUBLIC_SITE_URL", "http://localhost:3000");
+  },
   siteName: process.env.NEXT_PUBLIC_SITE_NAME || "Safety Poster Prints",
   supabaseUrl: process.env.NEXT_PUBLIC_SUPABASE_URL || "",
   supabasePublishableKey: process.env.NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY || "",
